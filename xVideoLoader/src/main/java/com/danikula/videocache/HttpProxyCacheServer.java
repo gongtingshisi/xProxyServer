@@ -65,14 +65,14 @@ public class HttpProxyCacheServer {
     private static final String PROXY_HOST = "127.0.0.1";
 
     private final Object clientsLock = new Object();
-    private final ExecutorService socketProcessor = Executors.newFixedThreadPool(8);
+    private final ExecutorService socketProcessor = Executors.newCachedThreadPool();//.newFixedThreadPool(8);
     private final Map<String, HttpProxyCacheServerClients> clientsMap = new ConcurrentHashMap<>();
     private final ServerSocket serverSocket;
     private final int port;
     private final Thread waitConnectionThread;
     private final Config config;
     private final Pinger pinger;
-    private final ExecutorService preloadProcessor = Executors.newFixedThreadPool(6);
+    private final ExecutorService preloadProcessor = Executors.newCachedThreadPool();//.newFixedThreadPool(6);
     private final Object redirectLock = new Object();
     /**
      * whether we should give an expire timeout?
@@ -120,29 +120,34 @@ public class HttpProxyCacheServer {
     /**
      * preload partial data in advance
      *
+     * @param title    :unique title
      * @param url      :the url to load
      * @param duration :video duration,unit:second
      * @param second   :time to preload,unit:second
      */
-    public void preload(String url, long duration, int second) {
-        int bitrate = 200 * 1000;
+    public void preload(String title, String url, long duration, int second, CacheListener cacheListener) {
+        if (url == null || duration <= 0 || second <= 0)
+            return;
+        int bitrate = 400 * 1000;
         long size = (512 * duration + bitrate * second / 8);
         synchronized (redirectLock) {
             if (redirectMap.containsKey(url)) {
                 String redirected = redirectMap.get(url);
                 synchronized (clientsLock) {
                     if (clientsMap.containsKey(redirected)) {
-                        LOG.warn(url + " is running,ignore.");
+                        LOG.warn(url + " is running,ignore.....");
                         return;
                     }
                 }
             }
         }
-        LOG.warn("preload " + url + ", size:" + size);
-        preloadProcessor.submit(new PreloadRunnable(url, 0, size));
+        LOG.warn("preload " + title + ", size:" + size);
+        preloadProcessor.submit(new PreloadRunnable(title, url, 0, size, cacheListener));
     }
 
-    public void request(String url) {
+    private void request(String url) {
+        if (url == null)
+            return;
         preloadProcessor.submit(new MockSocket(url));
     }
 
@@ -198,47 +203,50 @@ public class HttpProxyCacheServer {
     }
 
     /**
-     * return offset size of preloaded partial file.-1 on failure.
+     * return offset size of preloaded partial file.0 on failure.
      */
-    private long getCacheFieSize(String url) {
+    private long getCacheFileSize(String url) {
         File file = getCacheFile(url);
-        return file.exists() ? file.length() : -1;
+        return file.exists() ? file.length() : 0;
     }
 
     class PreloadRunnable implements Runnable {
+        String title;
         String url;
         long offset;
         long size;
         HttpUrlSource urlSource;
+        CacheListener cacheListener;
 
-        public PreloadRunnable(String url, long offset, long size) {
+        public PreloadRunnable(String title, String url, long offset, long size, CacheListener cacheListener) {
+            this.title = title;
             this.url = url;
             this.offset = offset;
             this.size = size;
+            this.cacheListener = cacheListener;
         }
 
         @Override
         public void run() {
-            String before = url;
             try {
                 url = redirect(url);
                 if (url == null)
                     return;
-                LOG.warn(before + " # Preload key:" + config.fileNameGenerator.generate(url));
+                LOG.warn(title + " # Preload key:" + config.fileNameGenerator.generate(url));
                 String proxy = getProxyUrl(url);
                 if (URLUtil.isFileUrl(proxy)) {
-                    LOG.warn("Local cache found,preload success # " + getTaskId(url));
+                    LOG.warn("Local cache found,preload success # " + title);
                     return;
                 }
 
                 synchronized (clientsLock) {
                     HttpProxyCacheServerClients clients = clientsMap.get(url);
                     if (clients == null) {
-                        clients = new HttpProxyCacheServerClients(url, config, size);
+                        clients = new HttpProxyCacheServerClients(title, url, config, size, cacheListener);
                         clientsMap.put(url, clients);
                     }
                 }
-                urlSource = new HttpUrlSource(proxy);
+                urlSource = new HttpUrlSource(title, proxy);
                 urlSource.openPartial(0, size);
             } catch (Exception e) {
                 HandyUtil.handle("preload " + this.urlSource, e);
@@ -266,6 +274,8 @@ public class HttpProxyCacheServer {
     }
 
     public String getPureProxyUrl(String url) {
+        if (url == null)
+            return null;
         return isAlive() ? appendToProxyUrl(url) : url;
     }
 
@@ -387,12 +397,11 @@ public class HttpProxyCacheServer {
             HttpURLConnection connection;
             boolean redirected;
             int redirectCount = 0;
-            long time = System.currentTimeMillis();
             String ourl = url;
             do {
                 connection = (HttpURLConnection) new URL(url).openConnection();
                 connection.setInstanceFollowRedirects(false);
-
+                connection.setConnectTimeout(3 * 1000);
                 int code = connection.getResponseCode();
                 redirected = code == HTTP_MOVED_PERM || code == HTTP_MOVED_TEMP || code == HTTP_SEE_OTHER;
                 if (redirected) {
@@ -404,9 +413,7 @@ public class HttpProxyCacheServer {
                     throw new ProxyCacheException("Too many redirects: " + redirectCount);
                 }
             } while (redirected && redirectCount < MAX_ALLOW);
-            LOG.warn("redirect " + ourl + " time: " + (System.currentTimeMillis() - time) + " ##### " + getTaskId(url));
 
-            time = System.currentTimeMillis();
             if (!ourl.equals(url)) {
                 synchronized (redirectLock) {
                     if (!redirectMap.containsKey(ourl)) {
@@ -414,7 +421,6 @@ public class HttpProxyCacheServer {
                     }
                 }
             }
-            LOG.warn("redirect finish " + ourl + " TTTOOO " + url + " time: " + (System.currentTimeMillis() - time) + " ##### " + getTaskId(url));
             return url;
         } catch (Exception e) {
             HandyUtil.handle("redirect error.", e);
@@ -431,6 +437,9 @@ public class HttpProxyCacheServer {
 
     private void processSocket(Socket socket) {
         try {
+            //If this request is from player which ranges from a keyframe position,not from last cache position.
+            //  1.we'd cancel previous network request.
+            //  2.whether the previous cached file fragment is thrown or reused.
             GetRequest request = GetRequest.read(socket.getInputStream());
 
             String url = ProxyCacheUtils.decode(request.uri);
@@ -442,7 +451,8 @@ public class HttpProxyCacheServer {
                 url = redirect(url);
                 if (url == null)
                     return;
-                LOG.warn("Request to cache proxy:" + url + " , " + request + " # " + getTaskId(url));
+                long cached = getCacheFileSize(url);
+                LOG.warn("Request to cache proxy:" + url + " , " + request + ",cached size:" + cached + "  # " + getTaskId(url));
                 //todo:if we play the in-preloading state one,we ought to cancel the task,pick up downloaded part.
 //                synchronized (clientsLock) {
 //                    if (clientsMap.containsKey(url) && clientsMap.get(url).getRequestSize() != Integer.MIN_VALUE) {
@@ -452,13 +462,18 @@ public class HttpProxyCacheServer {
 //                    }
 //                }
                 request.setUri(url);
-                long offset = request.keyFrameRequest ? request.rangeOffset : getCacheFieSize(url);
+                if (cached != 0 && request.keyFrameRequest && request.rangeOffset > cached) {
+                    LOG.warn("searching key frame info out of range.. this will lead to load slow.\n" +
+                            "              1.we ought to cancel previous network request.\n" +
+                            "              2.whether the previous cached file fragment is thrown or reused..");
+                }
+                long offset = request.keyFrameRequest ? request.rangeOffset : cached;
 
                 HttpProxyCacheServerClients clients = getClients(url);
                 boolean continuePartial = false;
-                if (offset != -1) {
+                if (offset != 0) {
                     continuePartial = !request.keyFrameRequest;
-                    LOG.warn("Continue "/* + (uncompleted ? "uncompleted" : "complete")*/ + " partial cache,load from:" + offset + " # " + getTaskId(url));
+                    LOG.warn("Continue "/* + (uncompleted ? "uncompleted" : "complete")*/ + "partial cache,load from:" + offset + " # " + getTaskId(url));
                     request.setRangeOffset(offset);
                     clients.clearRequestSize();
                 }
@@ -487,7 +502,7 @@ public class HttpProxyCacheServer {
         synchronized (clientsLock) {
             HttpProxyCacheServerClients clients = clientsMap.get(url);
             if (clients == null) {
-                clients = new HttpProxyCacheServerClients(url, config, Integer.MIN_VALUE);
+                clients = new HttpProxyCacheServerClients(null, url, config, Integer.MIN_VALUE);
                 clientsMap.put(url, clients);
             }
             return clients;

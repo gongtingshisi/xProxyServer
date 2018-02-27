@@ -27,21 +27,28 @@ final class HttpProxyCacheServerClients {
 
     private final AtomicInteger clientsCount = new AtomicInteger(0);
     private final String url;
+    private String title;
     private volatile HttpProxyCache proxyCache;
     private final List<CacheListener> listeners = new CopyOnWriteArrayList<>();
     private final CacheListener uiCacheListener;
     private final Config config;
     private long requestSize = Integer.MIN_VALUE;
 
-    public HttpProxyCacheServerClients(String url, Config config, long requestSize) {
+    public HttpProxyCacheServerClients(String title, String url, Config config, long requestSize) {
+        this.title = title;
         this.url = checkNotNull(url);
         this.config = checkNotNull(config);
-        this.uiCacheListener = new UiListenerHandler(url, listeners);
+        this.uiCacheListener = new UiListenerHandler(title, url, listeners);
         this.requestSize = requestSize;
     }
 
-    public long getRequestSize() {
-        return requestSize;
+    public HttpProxyCacheServerClients(String title, String url, Config config, long requestSize, CacheListener cacheListener) {
+        listeners.add(cacheListener);
+        this.title = title;
+        this.url = checkNotNull(url);
+        this.config = checkNotNull(config);
+        this.uiCacheListener = new UiListenerHandler(title, url, listeners);
+        this.requestSize = requestSize;
     }
 
     public void clearRequestSize() {
@@ -97,7 +104,7 @@ final class HttpProxyCacheServerClients {
     }
 
     private HttpProxyCache newHttpProxyCache(boolean continuePartial) throws ProxyCacheException {
-        HttpUrlSource source = new HttpUrlSource(url, config.sourceInfoStorage, config.headerInjector, continuePartial);
+        HttpUrlSource source = new HttpUrlSource(title, url, config.sourceInfoStorage, config.headerInjector, continuePartial);
         File file = config.generateCacheFile(url);
         FileCache cache = new FileCache(file, config.diskUsage);
         HttpProxyCache httpProxyCache = new HttpProxyCache(source, cache);
@@ -106,18 +113,19 @@ final class HttpProxyCacheServerClients {
     }
 
     private static final class UiListenerHandler extends Handler implements CacheListener {
-
+        private String title;
         private final String url;
         private final List<CacheListener> listeners;
 
-        public UiListenerHandler(String url, List<CacheListener> listeners) {
+        public UiListenerHandler(String title, String url, List<CacheListener> listeners) {
             super(Looper.getMainLooper());
+            this.title = title;
             this.url = url;
             this.listeners = listeners;
         }
 
         @Override
-        public void onCacheAvailable(File file, String url, int percentsAvailable) {
+        public void onCacheAvailable(String title, File file, String url, int percentsAvailable) {
             Message message = obtainMessage();
             message.arg1 = percentsAvailable;
             message.obj = file;
@@ -127,7 +135,7 @@ final class HttpProxyCacheServerClients {
         @Override
         public void handleMessage(Message msg) {
             for (CacheListener cacheListener : listeners) {
-                cacheListener.onCacheAvailable((File) msg.obj, url, msg.arg1);
+                cacheListener.onCacheAvailable(title, (File) msg.obj, url, msg.arg1);
             }
         }
     }

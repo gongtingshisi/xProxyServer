@@ -39,7 +39,7 @@ class ProxyCache {
     public int read(byte[] buffer, long offset, int length) throws ProxyCacheException {
         ProxyCacheUtils.assertBuffer(buffer, offset, length);
 
-        while (!cache.isCompleted() && cache.available() < (offset + length) && !stopped) {
+        while (!cache.isCompleted() && cache.available() < (offset + length) && !stopped && (cache.available() < source.length())) {
             readSourceAsync();
             waitForSourceData();
             checkReadSourceErrorsCount();
@@ -55,7 +55,7 @@ class ProxyCache {
     public int read(byte[] buffer, long offset, int length, long requestSize) throws ProxyCacheException {
         ProxyCacheUtils.assertBuffer(buffer, offset, length);
 
-        while (!cache.isCompleted() && cache.available() < (offset + length) && !stopped && cache.available() < requestSize) {
+        while (!cache.isCompleted() && cache.available() < (offset + length) && !stopped && (cache.available() < requestSize)) {
             readSourceAsync(requestSize);
             waitForSourceData();
             checkReadSourceErrorsCount();
@@ -77,6 +77,7 @@ class ProxyCache {
     }
 
     public void shutdown() {
+        //这个地方如果早于complete的话，一直持有锁，会导致FileCache的流关闭
         synchronized (stopLock) {
             LOG.warn("Shutdown proxy for " + source);
             try {
@@ -133,6 +134,7 @@ class ProxyCache {
         if (sourceLengthKnown && percentsChanged) {
             onCachePercentsAvailableChanged(percents);
         }
+//        LOG.warn("已经下载" + cacheAvailable + "/" + sourceLength);
         percentsAvailable = percents;
     }
 
@@ -157,6 +159,7 @@ class ProxyCache {
             while ((readBytes = source.read(buffer)) != -1) {
                 synchronized (stopLock) {
                     if (isStopped()) {
+                        LOG.warn("readSource thread is stopped.");
                         return;
                     }
                     cache.append(buffer, readBytes);
@@ -164,7 +167,7 @@ class ProxyCache {
                 offset += readBytes;
                 notifyNewCacheDataAvailable(offset, sourceAvailable);
             }
-            if (tryComplete()) {
+            if (tryComplete(requestSize)) {
                 onSourceRead();
                 LOG.warn("\n\n#####Preload success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
             } else {
@@ -185,14 +188,16 @@ class ProxyCache {
         onCachePercentsAvailableChanged(percentsAvailable);
     }
 
-    private boolean tryComplete() throws ProxyCacheException {
-        synchronized (stopLock) {
-            long available = cache.available();
-            if (!isStopped() && available == (source instanceof HttpUrlSource ? ((HttpUrlSource) source).getRequestSize() : source.length())) {
-                return cache.complete();
-            }
-        }
-        return false;
+    private boolean tryComplete(long requestSize) throws ProxyCacheException {
+        //如果notifyNewCacheDataAvailable通知了另一个线程优先于此处执行，它持有这个锁，导致把FileCache流关闭，那么此处 cache.available就会抛出读取文件句柄异常
+//        synchronized (stopLock) {
+        long available = cache.available();
+        LOG.warn("tryComplete " + isStopped() + " " + available + " " + requestSize + " " + source.length());
+//            if (!isStopped() && available == (source instanceof HttpUrlSource ? requestSize : source.length())) {
+        return cache.complete();
+//            }
+//        }
+//        return false;
     }
 
     private boolean isStopped() {

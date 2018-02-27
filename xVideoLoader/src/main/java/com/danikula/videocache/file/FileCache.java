@@ -91,9 +91,9 @@ public class FileCache implements Cache {
 
     @Override
     public synchronized boolean complete() throws ProxyCacheException {
-//        if (isCompleted()) {
-//            return;
-//        }
+        if (isCompleted()) {
+            return true;
+        }
         close();
         String fileName = file.getName().substring(0, file.getName().length() - TEMP_POSTFIX.length());
         File completedFile = new File(file.getParentFile(), fileName);

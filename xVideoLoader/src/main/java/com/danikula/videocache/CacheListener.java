@@ -10,5 +10,8 @@ import java.io.File;
  */
 public interface CacheListener {
 
-    void onCacheAvailable(File cacheFile, String url, int percentsAvailable);
+    /**
+     * title can be null
+     */
+    void onCacheAvailable(String title, File cacheFile, String url, int percentsAvailable);
 }
