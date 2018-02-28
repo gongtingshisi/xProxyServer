@@ -30,6 +30,8 @@ import static java.util.concurrent.TimeUnit.MILLISECONDS;
  * Pings {@link HttpProxyCacheServer} to make sure it works.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 
 class Pinger {
@@ -69,7 +71,6 @@ class Pinger {
             timeout *= 2;
         }
         String error = String.format(Locale.US, "Error pinging server (attempts: %d, max timeout: %d). " +
-                        "If you see this message, please, report at https://github.com/danikula/AndroidVideoCache/issues/134. " +
                         "Default proxies are: %s"
                 , attempts, timeout / 2, getDefaultProxies());
         LOG.error(error, new ProxyCacheException(error));

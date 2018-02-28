@@ -15,6 +15,8 @@ import java.io.RandomAccessFile;
  * {@link Cache} that uses file for storing data.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class FileCache implements Cache {
     private static final Logger LOG = LoggerFactory.getLogger("FileCache");

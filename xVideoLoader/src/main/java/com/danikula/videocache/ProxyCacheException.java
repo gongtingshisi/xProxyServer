@@ -4,6 +4,8 @@ package com.danikula.videocache;
  * Indicates any error in work of {@link ProxyCache}.
  *
  * @author Alexey Danilov
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class ProxyCacheException extends Exception {
 

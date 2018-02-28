@@ -15,6 +15,8 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * Useful for streaming something with caching e.g. streaming video/audio etc.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 class ProxyCache {
 
@@ -29,6 +31,10 @@ class ProxyCache {
     private volatile Thread sourceReaderThread;
     private volatile boolean stopped;
     private volatile int percentsAvailable = -1;
+    /**
+     * download speed,Bytes/s.keep in mind:single task speed,total speed,instant speed,average speed
+     */
+    public static long speed;
 
     public ProxyCache(Source source, Cache cache) {
         this.source = checkNotNull(source);
@@ -144,7 +150,6 @@ class ProxyCache {
     private void readSource(long requestSize) {
         long sourceAvailable = Integer.MIN_VALUE;
         long offset = 0;
-        long start = System.currentTimeMillis();
         try {
             offset = cache.available();
             long init = offset;
@@ -156,6 +161,9 @@ class ProxyCache {
             sourceAvailable = requestSize;
             byte[] buffer = new byte[ProxyCacheUtils.DEFAULT_BUFFER_SIZE];
             int readBytes;
+            long start = System.currentTimeMillis();
+            long last = offset;
+
             while ((readBytes = source.read(buffer)) != -1) {
                 synchronized (stopLock) {
                     if (isStopped()) {
@@ -166,12 +174,17 @@ class ProxyCache {
                 }
                 offset += readBytes;
                 notifyNewCacheDataAvailable(offset, sourceAvailable);
+                if (System.currentTimeMillis() - start > 1 * 1000) {
+                    speed = (offset - last);//instant single task speed
+                    last = offset;
+                    start = System.currentTimeMillis();
+                }
             }
             if (tryComplete(requestSize)) {
                 onSourceRead();
-                LOG.warn("\n\n#####Preload success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
+                LOG.warn("\n\n##### Load success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
             } else {
-                LOG.warn("\n\n#####Preload fail,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+                LOG.warn("\n\n##### Load fail,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
             }
         } catch (Throwable e) {
             readSourceErrorsCount.incrementAndGet();

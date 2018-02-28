@@ -6,6 +6,8 @@ import com.danikula.videocache.SourceInfo;
  * Storage for {@link SourceInfo}.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public interface SourceInfoStorage {
 

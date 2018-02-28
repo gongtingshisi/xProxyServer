@@ -20,6 +20,8 @@ import static com.danikula.videocache.ProxyCacheUtils.DEFAULT_BUFFER_SIZE;
  * {@link ProxyCache} that read http url and writes data to {@link Socket}
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 class HttpProxyCache extends ProxyCache {
     private static final Logger LOG = LoggerFactory.getLogger("HttpProxyCache");
@@ -29,6 +31,10 @@ class HttpProxyCache extends ProxyCache {
     private final HttpUrlSource source;
     private final FileCache cache;
     private CacheListener listener;
+
+    public long getSpeed() {
+        return speed;
+    }
 
     public HttpProxyCache(HttpUrlSource source, FileCache cache) {
         super(source, cache);
@@ -154,12 +160,16 @@ class HttpProxyCache extends ProxyCache {
     private boolean responseWithCache(OutputStream out, long offset) {
         byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
         int readBytes;
+        long size = 0;
+
         try {
             while ((readBytes = read(buffer, offset, buffer.length)) != -1) {
                 out.write(buffer, 0, readBytes);
                 offset += readBytes;
+                size += readBytes;
             }
             out.flush();
+            LOG.warn("\n\n##### WithCache offset " + offset + " loaded all success,in total:" + size + "  ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();
@@ -172,15 +182,19 @@ class HttpProxyCache extends ProxyCache {
     private boolean responseWithCache(OutputStream out, long offset, long requestSize) {
         byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
         int readBytes;
+        long size = 0;
+
         try {
             while ((readBytes = read(buffer, offset, buffer.length, requestSize)) != -1) {
                 out.write(buffer, 0, readBytes);
                 offset += readBytes;
+                size += readBytes;
             }
             out.flush();
+            LOG.warn("\n\n#####WithCache offset:" + offset + " with requestSize: " + requestSize + " loaded all success,in total:" + size + "  ##### " + source);
             return true;
         } catch (Exception e) {
-            HandyUtil.handle("responseWithCache offset:" + offset + " with requestSize: " + requestSize, e);
+            HandyUtil.handle("WithCache offset:" + offset + " with requestSize: " + requestSize, e);
             return false;
         }
     }
@@ -188,14 +202,28 @@ class HttpProxyCache extends ProxyCache {
     private boolean responseWithoutCache(OutputStream out, long offset) {
         HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
         try {
-            newSourceNoCache.open((int) offset);
+            long size = 0;
+            long last = 0;
             byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
             int readBytes;
+            long start = System.currentTimeMillis();
+
+            newSourceNoCache.open((int) offset);
             while ((readBytes = newSourceNoCache.read(buffer)) != -1) {
                 out.write(buffer, 0, readBytes);
                 offset += readBytes;
+                size += readBytes;
+                if (System.currentTimeMillis() - start > 1 * 1000) {
+                    speed = (size - last);//instant single task speed
+                    last = size;
+                    start = System.currentTimeMillis();
+                }
             }
             out.flush();
+            long time = (System.currentTimeMillis() - start) / 1000;
+            speed = size / time;
+            LOG.warn("\n\n##### Average Speed:" + speed + "B/s");
+            LOG.warn("\n\n##### WithoutCache offset " + offset + " loaded all success,in total:" + size + ",time:" + time + " ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();
@@ -213,18 +241,18 @@ class HttpProxyCache extends ProxyCache {
 
     private boolean responseFromCache(OutputStream out, long offset) {
         HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
+        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
+        int readBytes;
+        long write = 0;
+
         try {
-            byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-            int readBytes;
-            long write = 0;
-            long start = System.currentTimeMillis();
             //if we had downloaded whole file,just use it.
             while ((readBytes = cache.read(buffer, write, buffer.length)) > 0 /*&& write < offset*/) {
                 out.write(buffer, 0, readBytes);
                 write += readBytes;
             }
             out.flush();
-            LOG.warn("\n\n##### responseFromCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            LOG.warn("\n\n##### FromCache offset " + offset + " loaded from file success size:" + write + " ##### " + source);
             if (write != offset) {
                 throw new IllegalStateException();
             }
@@ -256,11 +284,14 @@ class HttpProxyCache extends ProxyCache {
         }
 
         HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
+        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
+        int readBytes;
+        long write = offset;
+        long start = System.currentTimeMillis();
+        long size = 0;
+        long last = 0;
+
         try {
-            byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-            int readBytes;
-            long write = offset;
-            long start = System.currentTimeMillis();
             //if we had downloaded whole file,just use it.
             if (offset < cacheSize) {
                 while ((readBytes = cache.read(buffer, write, buffer.length)) > 0 /*&& write < offset*/) {
@@ -268,22 +299,31 @@ class HttpProxyCache extends ProxyCache {
                     write += readBytes;
                 }
                 out.flush();
-                LOG.warn("\n\n##### responseSkipWithCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+                LOG.warn("\n\n##### SkipWithCache start offset " + offset + " loaded from file success size:" + (write - offset) + "  ##### " + source);
             }
-            start = System.currentTimeMillis();
 
             if (cacheSize < source.length()) {
                 newSourceNoCache.open((int) cacheSize);
-                LOG.warn("\n\n##### responseSkipWithCache load from server :" + write + " ##### " + source);
+                LOG.warn("\n\n##### SkipWithCache load from server offset:" + cacheSize + " ##### " + source);
                 while ((readBytes = newSourceNoCache.read(buffer)) > 0) {
                     out.write(buffer, 0, readBytes);
                     write += readBytes;
+                    size += readBytes;
                     cache.append(buffer, readBytes);
+                    if (System.currentTimeMillis() - start > 1 * 1000) {
+                        speed = (size - last);//instant single task speed
+                        last = size;
+                        start = System.currentTimeMillis();
+                    }
                 }
                 out.flush();
                 cache.complete();
+                LOG.warn("\n\n##### SkipWithCache load from server success size:" + size + " ##### " + source);
             }
-            LOG.warn("\n\n##### responseSkipWithCache loaded all success,in total:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            long time = (System.currentTimeMillis() - start) / 1000;
+            speed = size / time;
+            LOG.warn("\n\n##### Average Speed:" + speed + "B/s");
+            LOG.warn("\n\n##### SkipWithCache loaded all success,in total:" + write + ",time:" + time + " ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();
@@ -301,18 +341,19 @@ class HttpProxyCache extends ProxyCache {
 
     private boolean responseInsertCache(OutputStream out, long offset, boolean allInLocal) {
         HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
+        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
+        int readBytes;
+        long write = 0;
+        long start = System.currentTimeMillis();
+
         try {
-            byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-            int readBytes;
-            long write = 0;
-            long start = System.currentTimeMillis();
             //if we had downloaded whole file,just use it.
             while ((readBytes = cache.read(buffer, write, buffer.length)) > 0 /*&& write < offset*/) {
                 out.write(buffer, 0, readBytes);
                 write += readBytes;
             }
             out.flush();
-            LOG.warn("\n\n##### responseInsertCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            LOG.warn("\n\n##### InsertCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
             start = System.currentTimeMillis();
             if (allInLocal && write != offset) {
                 throw new IllegalStateException();
@@ -320,7 +361,7 @@ class HttpProxyCache extends ProxyCache {
 
             if (!allInLocal) {
                 newSourceNoCache.open((int) offset);
-                LOG.warn("\n\n##### responseInsertCache load from server :" + write + " ##### " + source);
+                LOG.warn("\n\n##### InsertCache load from server :" + write + " ##### " + source);
                 while ((readBytes = newSourceNoCache.read(buffer)) > 0) {
                     out.write(buffer, 0, readBytes);
                     write += readBytes;
@@ -329,7 +370,7 @@ class HttpProxyCache extends ProxyCache {
                 out.flush();
                 cache.complete();
             }
-            LOG.warn("\n\n##### responseInsertCache loaded all success,in total:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            LOG.warn("\n\n##### InsertCache loaded all success,in total:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();

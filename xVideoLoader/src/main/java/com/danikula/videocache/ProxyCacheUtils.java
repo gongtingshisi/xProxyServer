@@ -22,6 +22,8 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * Just simple utils.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class ProxyCacheUtils {
 

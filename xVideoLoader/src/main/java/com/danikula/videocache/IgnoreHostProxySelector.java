@@ -16,6 +16,8 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * It is important to <a href="https://github.com/danikula/AndroidVideoCache/issues/28">ignore system proxy</a> for localhost connection.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 class IgnoreHostProxySelector extends ProxySelector {
 

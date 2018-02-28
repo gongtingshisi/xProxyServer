@@ -4,6 +4,8 @@ package com.danikula.videocache;
  * Stores source's info.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class SourceInfo {
     public final String title;

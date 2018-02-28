@@ -1,5 +1,9 @@
 package com.danikula.videocache;
-
+/**
+ *
+ * @author zhangfeng
+ * @license: Apache License 2.0
+ * */
 public final class Preconditions {
 
     public static <T> T checkNotNull(T reference) {

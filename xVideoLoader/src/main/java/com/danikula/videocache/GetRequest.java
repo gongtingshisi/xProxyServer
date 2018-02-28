@@ -18,6 +18,8 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * Model for Http GET request.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 class GetRequest {
     private static final Logger LOG = LoggerFactory.getLogger("GetRequest");

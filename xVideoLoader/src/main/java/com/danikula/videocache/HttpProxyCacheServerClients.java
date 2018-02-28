@@ -21,6 +21,8 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * Client for {@link HttpProxyCacheServer}
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 final class HttpProxyCacheServerClients {
     private static final Logger LOG = LoggerFactory.getLogger("HttpProxyCacheServerClients");
@@ -72,6 +74,11 @@ final class HttpProxyCacheServerClients {
 
     private synchronized void startProcessRequest(boolean continuePartial) throws ProxyCacheException {
         proxyCache = proxyCache == null ? newHttpProxyCache(continuePartial) : proxyCache;
+    }
+
+    public long getCurrentSpeed() throws ProxyCacheException {
+        proxyCache = proxyCache == null ? newHttpProxyCache(false) : proxyCache;
+        return proxyCache.getSpeed();
     }
 
     private synchronized void finishProcessRequest() {

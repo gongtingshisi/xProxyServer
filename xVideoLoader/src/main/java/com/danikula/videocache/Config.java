@@ -11,6 +11,8 @@ import java.io.File;
  * Configuration for proxy cache.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 class Config {
 

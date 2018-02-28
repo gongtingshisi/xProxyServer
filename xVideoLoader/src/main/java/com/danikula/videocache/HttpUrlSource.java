@@ -30,6 +30,8 @@ import static java.net.HttpURLConnection.HTTP_SEE_OTHER;
  * {@link Source} that uses http resource as source for {@link ProxyCache}.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class HttpUrlSource implements Source {
     private static final Logger LOG = LoggerFactory.getLogger("HttpUrlSource");

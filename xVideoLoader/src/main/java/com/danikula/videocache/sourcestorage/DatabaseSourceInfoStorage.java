@@ -16,6 +16,8 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * Database based {@link SourceInfoStorage}.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 class DatabaseSourceInfoStorage extends SQLiteOpenHelper implements SourceInfoStorage {
 

@@ -16,6 +16,8 @@ import static android.os.Environment.MEDIA_MOUNTED;
  * See https://github.com/nostra13/Android-Universal-Image-Loader
  *
  * @author Sergey Tarasevich (nostra13[at]gmail[dot]com)
+ * @author zhangfeng
+ * @license: Apache License 2.0
  * @since 1.0.0
  */
 final class StorageUtils {

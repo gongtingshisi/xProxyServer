@@ -6,6 +6,8 @@ import java.io.File;
  * {@link DiskUsage} that uses LRU (Least Recently Used) strategy and trims cache size to max files count if needed.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class TotalCountLruDiskUsage extends LruDiskUsage {
 

@@ -4,6 +4,8 @@ package com.danikula.videocache;
  * Source for proxy.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public interface Source {
 

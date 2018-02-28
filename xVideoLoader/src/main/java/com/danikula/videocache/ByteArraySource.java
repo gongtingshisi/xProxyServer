@@ -6,6 +6,8 @@ import java.io.ByteArrayInputStream;
  * Simple memory based {@link Source} implementation.
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class ByteArraySource implements Source {
 

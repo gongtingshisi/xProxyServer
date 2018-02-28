@@ -30,6 +30,7 @@ import java.net.SocketException;
 import java.net.URL;
 import java.util.Locale;
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -59,21 +60,49 @@ import static java.net.HttpURLConnection.HTTP_SEE_OTHER;
  * </code></pre>
  *
  * @author Alexey Danilov (danikula@gmail.com).
+ * @author zhangfeng
+ * @license: Apache License 2.0
  */
 public class HttpProxyCacheServer {
     private static final Logger LOG = LoggerFactory.getLogger("HttpProxyCacheServer");
     private static final String PROXY_HOST = "127.0.0.1";
 
     private final Object clientsLock = new Object();
-    private final ExecutorService socketProcessor = Executors.newCachedThreadPool();//.newFixedThreadPool(8);
+    private final ExecutorService socketProcessor = Executors.newCachedThreadPool();
     private final Map<String, HttpProxyCacheServerClients> clientsMap = new ConcurrentHashMap<>();
     private final ServerSocket serverSocket;
     private final int port;
     private final Thread waitConnectionThread;
     private final Config config;
     private final Pinger pinger;
-    private final ExecutorService preloadProcessor = Executors.newCachedThreadPool();//.newFixedThreadPool(6);
+    private final ExecutorService preloadProcessor = Executors.newCachedThreadPool();
     private final Object redirectLock = new Object();
+    private long speed;
+    private ArrayBlockingQueue<PreloadInfo> blockingQueue = new ArrayBlockingQueue<>(50);
+    private final Object preloadLock = new Object();
+    private boolean interrupt = false;
+    private Thread conductPreloadThread = new Thread() {
+        @Override
+        public void run() {
+            while (!interrupt) {
+                synchronized (preloadLock) {
+                    int allow = getMaxAllowedAccept();
+                    LOG.warn("max accepted:" + allow + " ，queue is empty?:" + blockingQueue.isEmpty());
+                    if (allow > 0 && !blockingQueue.isEmpty()) {
+                        PreloadInfo info = blockingQueue.poll();
+                        LOG.warn("### Start preload " + info);
+                        preloadProcessor.submit(new PreloadRunnable(info.title, info.url, 0, getOfferSize(info), info.cacheListener));
+                    }
+                    try {
+                        preloadLock.wait();
+                    } catch (InterruptedException e) {
+                        e.printStackTrace();
+                    }
+                }
+            }
+        }
+    };
+
     /**
      * whether we should give an expire timeout?
      */
@@ -96,6 +125,7 @@ public class HttpProxyCacheServer {
             startSignal.await(); // freeze thread, wait for server starts
             this.pinger = new Pinger(PROXY_HOST, port);
             LOG.debug("Proxy cache server started. Is it alive? " + isAlive());
+            conductPreloadThread.start();
         } catch (IOException | InterruptedException e) {
             socketProcessor.shutdown();
             throw new IllegalStateException("Error starting local proxy server", e);
@@ -117,6 +147,85 @@ public class HttpProxyCacheServer {
         return getProxyUrl(url, true);
     }
 
+    class PreloadInfo {
+        String title;
+        String url;
+        long duration;
+        int offer;
+        CacheListener cacheListener;
+
+        public PreloadInfo(String title, String url, long duration, int offer, CacheListener cacheListener) {
+            this.title = title;
+            this.url = url;
+            this.duration = duration;
+            this.offer = offer;
+            this.cacheListener = cacheListener;
+        }
+
+        @Override
+        public boolean equals(Object o) {
+            if (this == o) return true;
+            if (o == null || getClass() != o.getClass()) return false;
+            PreloadInfo info = (PreloadInfo) o;
+            return url.equals(info.url);
+        }
+
+        @Override
+        public String toString() {
+            return "PreloadInfo{" +
+                    "title='" + title + '\'' +
+                    ", url='" + url + '\'' +
+                    ", duration=" + duration +
+                    ", offer=" + offer +
+                    ", cacheListener=" + cacheListener +
+                    '}';
+        }
+    }
+
+    enum SPEED {
+        NONE,
+        SLOW,
+        NORMAL,
+        HIGH
+    }
+
+    public static final int SPEED_NONE_MAX_NUM = 0;
+    public static final int SPEED_SLOW_MAX_NUM = 1;
+    public static final int SPEED_NORMAL_MAX_NUM = 2;
+    public static final int SPEED_HIGH_MAX_NUM = 3;
+
+    private SPEED getSpeed() {
+        speed = HttpProxyCache.speed;
+        LOG.warn("instant single speed:" + speed);
+        if (speed < 1 * 1024)
+            return SPEED.NONE;
+        else if (speed < 30 * 1024)
+            return SPEED.SLOW;
+        else if (speed < 100 * 1024)
+            return SPEED.NORMAL;
+        else
+            return SPEED.HIGH;
+    }
+
+    private int getMaxAllowedAccept() {
+        int allow = 0;
+        switch (getSpeed()) {
+            case NONE:
+                allow = SPEED_NONE_MAX_NUM - getClientsCount();
+                break;
+            case SLOW:
+                allow = SPEED_SLOW_MAX_NUM - getClientsCount();
+                break;
+            case NORMAL:
+                allow = SPEED_NORMAL_MAX_NUM - getClientsCount();
+                break;
+            case HIGH:
+                allow = SPEED_HIGH_MAX_NUM - getClientsCount();
+                break;
+        }
+        return (allow < 0) ? 0 : allow;
+    }
+
     /**
      * preload partial data in advance
      *
@@ -126,10 +235,8 @@ public class HttpProxyCacheServer {
      * @param second   :time to preload,unit:second
      */
     public void preload(String title, String url, long duration, int second, CacheListener cacheListener) {
-        if (url == null || duration <= 0 || second <= 0)
-            return;
-        int bitrate = 400 * 1000;
-        long size = (512 * duration + bitrate * second / 8);
+        if (url == null || duration <= 0 || second <= 0 || cacheListener == null)
+            throw new IllegalArgumentException("Hi guy,your argument has problem, plz check it !");
         synchronized (redirectLock) {
             if (redirectMap.containsKey(url)) {
                 String redirected = redirectMap.get(url);
@@ -141,8 +248,18 @@ public class HttpProxyCacheServer {
                 }
             }
         }
-        LOG.warn("preload " + title + ", size:" + size);
-        preloadProcessor.submit(new PreloadRunnable(title, url, 0, size, cacheListener));
+        synchronized (preloadLock) {
+            PreloadInfo info = new PreloadInfo(title, url, duration, second, cacheListener);
+            if (!blockingQueue.contains(info)) {
+                LOG.warn("New a preload task:" + title);
+                blockingQueue.add(info);
+            }
+        }
+    }
+
+    private long getOfferSize(PreloadInfo info) {
+        int bitrate = 400 * 1000;
+        return (512 * info.duration + bitrate * info.offer / 8);
     }
 
     private void request(String url) {
@@ -330,6 +447,7 @@ public class HttpProxyCacheServer {
 
         //i think these below should be guarded,except while app was killed..
         waitConnectionThread.interrupt();
+        interrupt = true;
         try {
             if (!serverSocket.isClosed()) {
                 serverSocket.close();
@@ -435,14 +553,18 @@ public class HttpProxyCacheServer {
         return config.fileNameGenerator.generate(url);
     }
 
+    /**
+     * return false on ping,otherwise true
+     */
     private void processSocket(Socket socket) {
+        String url = null;
         try {
             //If this request is from player which ranges from a keyframe position,not from last cache position.
             //  1.we'd cancel previous network request.
             //  2.whether the previous cached file fragment is thrown or reused.
             GetRequest request = GetRequest.read(socket.getInputStream());
 
-            String url = ProxyCacheUtils.decode(request.uri);
+            url = ProxyCacheUtils.decode(request.uri);
 
             if (pinger.isPingRequest(url)) {
                 pinger.responseToPing(socket);
@@ -478,6 +600,7 @@ public class HttpProxyCacheServer {
                     clients.clearRequestSize();
                 }
                 clients.processRequest(request, socket, continuePartial);
+                speed = clients.getCurrentSpeed();
 
                 synchronized (clientsLock) {
                     if (clientsMap.containsKey(url)) {
@@ -495,6 +618,11 @@ public class HttpProxyCacheServer {
         } finally {
             releaseSocket(socket);
             LOG.warn("Opened connections: " + getClientsCount());
+        }
+        if (!pinger.isPingRequest(url)) {
+            synchronized (preloadLock) {
+                preloadLock.notifyAll();
+            }
         }
     }
 
