@@ -1,5 +1,7 @@
 package com.danikula.videocache;
 
+import android.util.Log;
+
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -34,7 +36,7 @@ class ProxyCache {
     /**
      * download speed,Bytes/s.keep in mind:single task speed,total speed,instant speed,average speed
      */
-    public static long speed;
+    public static long speed = -1;
 
     public ProxyCache(Source source, Cache cache) {
         this.source = checkNotNull(source);
@@ -182,7 +184,8 @@ class ProxyCache {
             }
             if (tryComplete(requestSize)) {
                 onSourceRead();
-                LOG.warn("\n\n##### Load success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
+                if (Log.isLoggable("ProxyCache", Log.DEBUG))
+                    LOG.warn("\n\n##### Load success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
             } else {
                 LOG.warn("\n\n##### Load fail,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
             }
@@ -204,8 +207,8 @@ class ProxyCache {
     private boolean tryComplete(long requestSize) throws ProxyCacheException {
         //如果notifyNewCacheDataAvailable通知了另一个线程优先于此处执行，它持有这个锁，导致把FileCache流关闭，那么此处 cache.available就会抛出读取文件句柄异常
 //        synchronized (stopLock) {
-        long available = cache.available();
-        LOG.warn("tryComplete " + isStopped() + " " + available + " " + requestSize + " " + source.length());
+//        long available = cache.available();
+//        LOG.warn("tryComplete " + isStopped() + " " + available + " " + requestSize + " " + source.length());
 //            if (!isStopped() && available == (source instanceof HttpUrlSource ? requestSize : source.length())) {
         return cache.complete();
 //            }

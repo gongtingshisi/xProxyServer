@@ -141,8 +141,10 @@ final class HttpProxyCacheServerClients {
 
         @Override
         public void handleMessage(Message msg) {
+            File file = (File) msg.obj;
             for (CacheListener cacheListener : listeners) {
-                cacheListener.onCacheAvailable(title, (File) msg.obj, url, msg.arg1);
+                if (msg.arg1 == 100 && file.exists() && file.length() > 0)
+                    cacheListener.onCacheAvailable(title, file, url, 100);
             }
         }
     }

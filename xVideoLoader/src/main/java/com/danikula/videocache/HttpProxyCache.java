@@ -1,6 +1,7 @@
 package com.danikula.videocache;
 
 import android.text.TextUtils;
+import android.util.Log;
 
 import com.danikula.videocache.file.FileCache;
 
@@ -52,16 +53,20 @@ class HttpProxyCache extends ProxyCache {
         try {
             OutputStream out = new BufferedOutputStream(socket.getOutputStream());
             String responseHeaders = newResponseHeaders(request, requestSize, request.keyFrameRequest, continuePartial);
-            LOG.warn("continuePartial:" + continuePartial + ", response:" + responseHeaders + ", " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG)) {
+                LOG.warn("continuePartial:" + continuePartial + " ," + " \n\nSource:" + source);
+            }
             out.write(responseHeaders.getBytes("UTF-8"));
 
             long offset = request.rangeOffset;
             //todo:if we play the in-preloading state task,cancel it,pick up downloaded part.but,we will resolve file stubs related.
             if (cache.getFile().exists() && cache.isCompleted()) {
                 if (continuePartial) {
-                    return ret = responseFromCache(out, offset);
+                    return responseFromCache(out, offset); // ret = responseInsertCache(out, offset, false);
                 } else if (request.keyFrameRequest && offset <= cache.available()) {
                     return ret = responseSkipWithCache(out, offset);
+                } else {
+                    return ret = responseWithCache(out, offset);
                 }
             } else if (isUseCache(request)) {
                 if (requestSize == Integer.MIN_VALUE) {
@@ -93,7 +98,8 @@ class HttpProxyCache extends ProxyCache {
     }
 
     private String newResponseHeaders(GetRequest request, long requestSize, boolean requestKeyFrame, boolean continuePartial) throws IOException, ProxyCacheException {
-        LOG.warn("request:" + request + " ,requestSize:" + requestSize + " ,cache.available:" + cache.available() + " ,source.length:" + source.length() + " ,continuePartial:" + continuePartial);
+        if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+            LOG.warn("request:" + request + " ,requestSize:" + requestSize + " ,cache.available:" + cache.available() + " ,source.length:" + source.length() + " ,continuePartial:" + continuePartial);
         LOG.warn("\n" + source);
         if (requestSize != Integer.MIN_VALUE) {
             String mime = source.getMime();
@@ -169,7 +175,8 @@ class HttpProxyCache extends ProxyCache {
                 size += readBytes;
             }
             out.flush();
-            LOG.warn("\n\n##### WithCache offset " + offset + " loaded all success,in total:" + size + "  ##### " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n##### WithCache offset " + offset + " loaded all success,in total:" + size + "  ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();
@@ -191,7 +198,8 @@ class HttpProxyCache extends ProxyCache {
                 size += readBytes;
             }
             out.flush();
-            LOG.warn("\n\n#####WithCache offset:" + offset + " with requestSize: " + requestSize + " loaded all success,in total:" + size + "  ##### " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n#####WithCache offset:" + offset + " with requestSize: " + requestSize + " loaded all success,in total:" + size + "  ##### " + source);
             return true;
         } catch (Exception e) {
             HandyUtil.handle("WithCache offset:" + offset + " with requestSize: " + requestSize, e);
@@ -220,10 +228,9 @@ class HttpProxyCache extends ProxyCache {
                 }
             }
             out.flush();
-            long time = (System.currentTimeMillis() - start) / 1000;
-            speed = size / time;
-            LOG.warn("\n\n##### Average Speed:" + speed + "B/s");
-            LOG.warn("\n\n##### WithoutCache offset " + offset + " loaded all success,in total:" + size + ",time:" + time + " ##### " + source);
+
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n##### WithoutCache offset " + offset + " loaded all success,in total:" + size + " ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();
@@ -252,7 +259,8 @@ class HttpProxyCache extends ProxyCache {
                 write += readBytes;
             }
             out.flush();
-            LOG.warn("\n\n##### FromCache offset " + offset + " loaded from file success size:" + write + " ##### " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n##### FromCache offset " + offset + " loaded from file success size:" + write + " ##### " + source);
             if (write != offset) {
                 throw new IllegalStateException();
             }
@@ -299,12 +307,14 @@ class HttpProxyCache extends ProxyCache {
                     write += readBytes;
                 }
                 out.flush();
-                LOG.warn("\n\n##### SkipWithCache start offset " + offset + " loaded from file success size:" + (write - offset) + "  ##### " + source);
+                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                    LOG.warn("\n\n##### SkipWithCache start offset " + offset + " loaded from file success size:" + (write - offset) + "  ##### " + source);
             }
 
             if (cacheSize < source.length()) {
                 newSourceNoCache.open((int) cacheSize);
-                LOG.warn("\n\n##### SkipWithCache load from server offset:" + cacheSize + " ##### " + source);
+                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                    LOG.warn("\n\n##### SkipWithCache load from server offset:" + cacheSize + " ##### " + source);
                 while ((readBytes = newSourceNoCache.read(buffer)) > 0) {
                     out.write(buffer, 0, readBytes);
                     write += readBytes;
@@ -318,12 +328,11 @@ class HttpProxyCache extends ProxyCache {
                 }
                 out.flush();
                 cache.complete();
-                LOG.warn("\n\n##### SkipWithCache load from server success size:" + size + " ##### " + source);
+                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                    LOG.warn("\n\n##### SkipWithCache load from server success size:" + size + " ##### " + source);
             }
-            long time = (System.currentTimeMillis() - start) / 1000;
-            speed = size / time;
-            LOG.warn("\n\n##### Average Speed:" + speed + "B/s");
-            LOG.warn("\n\n##### SkipWithCache loaded all success,in total:" + write + ",time:" + time + " ##### " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n##### SkipWithCache loaded all success,in total:" + write + " ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();
@@ -353,7 +362,8 @@ class HttpProxyCache extends ProxyCache {
                 write += readBytes;
             }
             out.flush();
-            LOG.warn("\n\n##### InsertCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n##### InsertCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
             start = System.currentTimeMillis();
             if (allInLocal && write != offset) {
                 throw new IllegalStateException();
@@ -361,7 +371,8 @@ class HttpProxyCache extends ProxyCache {
 
             if (!allInLocal) {
                 newSourceNoCache.open((int) offset);
-                LOG.warn("\n\n##### InsertCache load from server :" + write + " ##### " + source);
+                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                    LOG.warn("\n\n##### InsertCache load from server :" + write + " ##### " + source);
                 while ((readBytes = newSourceNoCache.read(buffer)) > 0) {
                     out.write(buffer, 0, readBytes);
                     write += readBytes;
@@ -370,7 +381,8 @@ class HttpProxyCache extends ProxyCache {
                 out.flush();
                 cache.complete();
             }
-            LOG.warn("\n\n##### InsertCache loaded all success,in total:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
+                LOG.warn("\n\n##### InsertCache loaded all success,in total:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
             return true;
         } catch (ProxyCacheException e) {
             e.printStackTrace();

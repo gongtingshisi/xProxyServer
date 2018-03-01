@@ -2,9 +2,11 @@ package com.danikula.videocache;
 
 import android.content.Context;
 import android.net.Uri;
+import android.util.Log;
 import android.webkit.URLUtil;
 
 import com.danikula.videocache.file.DiskUsage;
+import com.danikula.videocache.file.FileCache;
 import com.danikula.videocache.file.FileNameGenerator;
 import com.danikula.videocache.file.Md5FileNameGenerator;
 import com.danikula.videocache.file.TotalCountLruDiskUsage;
@@ -43,21 +45,8 @@ import static java.net.HttpURLConnection.HTTP_MOVED_TEMP;
 import static java.net.HttpURLConnection.HTTP_SEE_OTHER;
 
 /**
- * Simple lightweight proxy server with file caching support that handles HTTP requests.
- * Typical usage:
- * <pre><code>
- * public onCreate(Bundle state) {
- *      super.onCreate(state);
- *
- *      HttpProxyCacheServer proxy = getProxy();
- *      String proxyUrl = proxy.getProxyUrl(VIDEO_URL);
- *      videoView.setVideoPath(proxyUrl);
- * }
- *
- * private HttpProxyCacheServer getProxy() {
- * // should return single instance of HttpProxyCacheServer shared for whole app.
- * }
- * </code></pre>
+ * Server to mainly preload partial file supported HTTP requests(typically such as mp4 stream),which accelerates the load speed when use.
+ * And more,we will readjust the preload size in parallel according to current network and running tasks to avoid block current playing video.
  *
  * @author Alexey Danilov (danikula@gmail.com).
  * @author zhangfeng
@@ -86,13 +75,19 @@ public class HttpProxyCacheServer {
         public void run() {
             while (!interrupt) {
                 synchronized (preloadLock) {
+                    int put = 0;
                     int allow = getMaxAllowedAccept();
-                    LOG.warn("max accepted:" + allow + " ，queue is empty?:" + blockingQueue.isEmpty());
-                    if (allow > 0 && !blockingQueue.isEmpty()) {
-                        PreloadInfo info = blockingQueue.poll();
-                        LOG.warn("### Start preload " + info);
-                        preloadProcessor.submit(new PreloadRunnable(info.title, info.url, 0, getOfferSize(info), info.cacheListener));
-                    }
+                    LOG.warn("max accepted:" + allow + " ，queue :" + blockingQueue.size() + " ,running:" + getClientsCount());
+                    do {
+                        if (allow > 0 && !blockingQueue.isEmpty()) {
+                            PreloadInfo info = blockingQueue.poll();
+                            LOG.warn("### Start preload " + info);
+                            preloadProcessor.submit(new PreloadRunnable(info.title, info.url, 0, getOfferSize(info), info.cacheListener));
+                            put++;
+                        } else
+                            break;
+                    } while (put < allow - getClientsCount());
+
                     try {
                         preloadLock.wait();
                     } catch (InterruptedException e) {
@@ -197,7 +192,9 @@ public class HttpProxyCacheServer {
     private SPEED getSpeed() {
         speed = HttpProxyCache.speed;
         LOG.warn("instant single speed:" + speed);
-        if (speed < 1 * 1024)
+        if (speed < 0) {
+            return getClientsCount() > 0 ? SPEED.NORMAL : SPEED.SLOW;
+        } else if (speed < 1 * 1024)
             return SPEED.NONE;
         else if (speed < 30 * 1024)
             return SPEED.SLOW;
@@ -229,10 +226,11 @@ public class HttpProxyCacheServer {
     /**
      * preload partial data in advance
      *
-     * @param title    :unique title
-     * @param url      :the url to load
-     * @param duration :video duration,unit:second
-     * @param second   :time to preload,unit:second
+     * @param title         :unique title
+     * @param url           :the url to load
+     * @param duration      :video duration,unit:second
+     * @param second        :time to preload,unit:second
+     * @param cacheListener :the notifier on completion
      */
     public void preload(String title, String url, long duration, int second, CacheListener cacheListener) {
         if (url == null || duration <= 0 || second <= 0 || cacheListener == null)
@@ -248,13 +246,41 @@ public class HttpProxyCacheServer {
                 }
             }
         }
+
+        PreloadInfo info = new PreloadInfo(title, url, duration, second, cacheListener);
+        //        if (isAlive()) {
         synchronized (preloadLock) {
-            PreloadInfo info = new PreloadInfo(title, url, duration, second, cacheListener);
-            if (!blockingQueue.contains(info)) {
+            if (!blockingQueue.contains(info) && !isCacheCompleted(url) && !isCached(url)) {
                 LOG.warn("New a preload task:" + title);
-                blockingQueue.add(info);
+                try {
+                    int size = blockingQueue.size();
+                    blockingQueue.add(info);
+                    if (size == 0)
+                        preloadLock.notifyAll();
+                } catch (IllegalStateException e) {
+                    LOG.error("Preload pool full exception ~~~ throw " + title);
+                }
             }
         }
+//        }
+    }
+
+    /**
+     * cancel a preload task if it hasn't been running.return true on success,otherwise false
+     *
+     * @param title :unique title
+     * @param url   :the url to cancel
+     */
+    public boolean cancel(String title, String url) {
+        if (url == null)
+            throw new IllegalArgumentException("Plz give a legal input!");
+        synchronized (preloadLock) {
+            if (blockingQueue.contains(url)) {
+                LOG.warn("Cancel preload " + title + " :" + url);
+                return blockingQueue.remove(url);
+            }
+        }
+        return false;
     }
 
     private long getOfferSize(PreloadInfo info) {
@@ -262,6 +288,9 @@ public class HttpProxyCacheServer {
         return (512 * info.duration + bitrate * info.offer / 8);
     }
 
+    /**
+     * mock a whole request instead partial range request,we reserve it for debug
+     */
     private void request(String url) {
         if (url == null)
             return;
@@ -473,6 +502,15 @@ public class HttpProxyCacheServer {
         return new File(cacheDir, fileName);
     }
 
+    private boolean isCacheCompleted(String url) {
+        try {
+            return new FileCache(getCacheFile(url), config.diskUsage).isCompleted();
+        } catch (ProxyCacheException e) {
+            e.printStackTrace();
+        }
+        return false;
+    }
+
     private void touchFileSafely(File cacheFile) {
         try {
             config.diskUsage.touch(cacheFile);
@@ -569,20 +607,24 @@ public class HttpProxyCacheServer {
             if (pinger.isPingRequest(url)) {
                 pinger.responseToPing(socket);
             } else {
-//                boolean uncompleted = false;
                 url = redirect(url);
                 if (url == null)
                     return;
+
+                /**
+                 * if has preload running
+                 * */
                 long cached = getCacheFileSize(url);
-                LOG.warn("Request to cache proxy:" + url + " , " + request + ",cached size:" + cached + "  # " + getTaskId(url));
-                //todo:if we play the in-preloading state one,we ought to cancel the task,pick up downloaded part.
-//                synchronized (clientsLock) {
-//                    if (clientsMap.containsKey(url) && clientsMap.get(url).getRequestSize() != Integer.MIN_VALUE) {
-//                        LOG.warn("Cancel running preload,ready to pick up uncompleted cache," + " # " + getTaskId(url));
+                if (Log.isLoggable("HttpProxyCacheServer", Log.DEBUG))
+                    LOG.warn("Request to cache proxy:" + url + " , " + request + ",cached size:" + cached + "  # " + getTaskId(url));
+
+                synchronized (clientsLock) {
+                    if (clientsMap.containsKey(url) && request.keyUA && !isCacheCompleted(url)) {
+                        LOG.warn("####### (Cancel) Previous running preload,ready to pick up uncompleted cache," + " # " + getTaskId(url) + " if possible !!!");
+                        //same url will access twice in a sequence.
 //                        clientsMap.get(url).shutdown();
-//                        uncompleted = true;
-//                    }
-//                }
+                    }
+                }
                 request.setUri(url);
                 if (cached != 0 && request.keyFrameRequest && request.rangeOffset > cached) {
                     LOG.warn("searching key frame info out of range.. this will lead to load slow.\n" +
@@ -735,7 +777,7 @@ public class HttpProxyCacheServer {
 
         public Builder(Context context) {
             this.sourceInfoStorage = SourceInfoStorageFactory.newSourceInfoStorage(context);
-            this.cacheRoot = StorageUtils.getIndividualCacheDirectory(context);
+            this.cacheRoot = context.getFilesDir();//StorageUtils.getIndividualCacheDirectory(context);
             this.diskUsage = new TotalSizeLruDiskUsage(DEFAULT_MAX_SIZE);
             this.fileNameGenerator = new Md5FileNameGenerator();
             this.headerInjector = new EmptyHeadersInjector();
@@ -753,7 +795,7 @@ public class HttpProxyCacheServer {
          * @param file a cache directory, can't be null.
          * @return a builder.
          */
-        public Builder cacheDirectory(File file) {
+        private Builder cacheDirectory(File file) {
             this.cacheRoot = checkNotNull(file);
             return this;
         }

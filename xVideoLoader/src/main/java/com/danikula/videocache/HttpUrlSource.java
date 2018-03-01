@@ -1,5 +1,7 @@
 package com.danikula.videocache;
 
+import android.util.Log;
+
 import com.danikula.videocache.file.FileNameGenerator;
 import com.danikula.videocache.file.Md5FileNameGenerator;
 import com.danikula.videocache.headers.EmptyHeadersInjector;
@@ -248,7 +250,7 @@ public class HttpUrlSource implements Source {
         int redirectCount = 0;
         String url = this.sourceInfo.url;
         do {
-            if (!Pinger.isPing(url))
+            if (!Pinger.isPing(url) && Log.isLoggable("HttpUrlSource", Log.DEBUG))
                 LOG.debug("Open connection " + (offset > 0 ? "with offset " + offset : "") + " to " + url + " # " + id);
             URL Url = new URL(url);
             connection = (HttpURLConnection) Url.openConnection();

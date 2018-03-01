@@ -21,7 +21,7 @@ import java.io.RandomAccessFile;
 public class FileCache implements Cache {
     private static final Logger LOG = LoggerFactory.getLogger("FileCache");
 
-    private static final String TEMP_POSTFIX = ".download";
+    public static final String TEMP_POSTFIX = ".download";
 
     private final DiskUsage diskUsage;
     public File file;

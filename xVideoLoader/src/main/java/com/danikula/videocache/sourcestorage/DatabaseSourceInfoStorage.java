@@ -8,6 +8,11 @@ import android.database.sqlite.SQLiteOpenHelper;
 import android.util.Log;
 
 import com.danikula.videocache.SourceInfo;
+import com.danikula.videocache.file.FileCache;
+import com.danikula.videocache.file.FileNameGenerator;
+import com.danikula.videocache.file.Md5FileNameGenerator;
+
+import java.io.File;
 
 import static com.danikula.videocache.Preconditions.checkAllNotNull;
 import static com.danikula.videocache.Preconditions.checkNotNull;
@@ -20,7 +25,7 @@ import static com.danikula.videocache.Preconditions.checkNotNull;
  * @license: Apache License 2.0
  */
 class DatabaseSourceInfoStorage extends SQLiteOpenHelper implements SourceInfoStorage {
-
+    private String TAG = "DatabaseSourceInfoStorage";
     private static final String TABLE = "SourceInfo";
     private static final String COLUMN_ID = "_id";
     private static final String COLUMN_TITLE = "title";
@@ -38,10 +43,14 @@ class DatabaseSourceInfoStorage extends SQLiteOpenHelper implements SourceInfoSt
                     COLUMN_LENGTH + " INTEGER," +
                     COLUMN_REQUEST_SIZE + " INTEGER" +
                     ");";
+    private static final String DROP_TABLE = "DROP TABLE " + TABLE + ";";
+    private FileNameGenerator generator = new Md5FileNameGenerator();
+    private Context context;
 
     DatabaseSourceInfoStorage(Context context) {
         super(context, "AndroidVideoCache.db", null, 2);
         checkNotNull(context);
+        this.context = context;
     }
 
     @Override
@@ -52,7 +61,48 @@ class DatabaseSourceInfoStorage extends SQLiteOpenHelper implements SourceInfoSt
 
     @Override
     public void onUpgrade(SQLiteDatabase db, int oldVersion, int newVersion) {
-        throw new IllegalStateException("Should not be called. There is no any migration");
+        Log.w(TAG, "onUpgrade " + oldVersion + "->" + newVersion);
+        deleteCache();
+        db.beginTransaction();
+        try {
+            db.execSQL(DROP_TABLE);
+            db.execSQL(CREATE_SQL);
+            db.setTransactionSuccessful();
+        } finally {
+            db.endTransaction();
+        }
+    }
+
+    private void deleteCache() {
+        new Thread() {
+            @Override
+            public void run() {
+                Cursor cursor = null;
+                File cacheDir = context.getFilesDir();
+                try {
+                    cursor = getReadableDatabase().rawQuery("select " + COLUMN_URL + " from " + TABLE, null);
+                    if (cursor != null) {
+                        while (cursor.moveToNext()) {
+                            String name = generator.generate(cursor.getString(cursor.getColumnIndex(COLUMN_URL)));
+                            File file = new File(cacheDir, name);
+                            File unFile = new File(cacheDir, name + FileCache.TEMP_POSTFIX);
+                            if (file.exists()) {
+                                file.delete();
+                                Log.w(TAG, "clear " + file.getName());
+                            }
+                            if (unFile.exists()) {
+                                unFile.delete();
+                                Log.w(TAG, "clear " + unFile.getName());
+                            }
+                        }
+                    }
+                } finally {
+                    if (cursor != null) {
+                        cursor.close();
+                    }
+                }
+            }
+        }.start();
     }
 
     @Override

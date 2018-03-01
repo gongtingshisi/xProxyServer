@@ -1,6 +1,7 @@
 package com.danikula.videocache;
 
 import android.text.TextUtils;
+import android.util.Log;
 
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
@@ -31,6 +32,7 @@ class GetRequest {
     public long rangeOffset;
     public final boolean partial;
     public boolean keyFrameRequest;
+    public boolean keyUA;
 
     private GetRequest(String request) {
         checkNotNull(request);
@@ -38,7 +40,7 @@ class GetRequest {
         this.rangeOffset = Math.max(0, offset);
         this.partial = offset >= 0;
         this.uri = findUri(request);
-        boolean keyUA = findUA(request);
+        this.keyUA = findUA(request);
         this.keyFrameRequest = (keyUA && offset > 0);
     }
 
@@ -57,7 +59,8 @@ class GetRequest {
         while (!TextUtils.isEmpty(line = reader.readLine())) { // until new line (headers ending)
             stringRequest.append(line).append('\n');
         }
-        LOG.warn("GetRequest:" + stringRequest.toString());
+        if (Log.isLoggable("GetRequest", Log.DEBUG))
+            LOG.warn("GetRequest:" + stringRequest.toString());
         return new GetRequest(stringRequest.toString());
     }
 
