@@ -6,7 +6,6 @@ import android.util.Log;
 import android.webkit.URLUtil;
 
 import com.danikula.videocache.file.DiskUsage;
-import com.danikula.videocache.file.FileCache;
 import com.danikula.videocache.file.FileNameGenerator;
 import com.danikula.videocache.file.Md5FileNameGenerator;
 import com.danikula.videocache.file.TotalCountLruDiskUsage;
@@ -40,6 +39,7 @@ import java.util.concurrent.Executors;
 
 import static com.danikula.videocache.Preconditions.checkAllNotNull;
 import static com.danikula.videocache.Preconditions.checkNotNull;
+import static com.danikula.videocache.file.FileCache.TEMP_POSTFIX;
 import static java.net.HttpURLConnection.HTTP_MOVED_PERM;
 import static java.net.HttpURLConnection.HTTP_MOVED_TEMP;
 import static java.net.HttpURLConnection.HTTP_SEE_OTHER;
@@ -70,10 +70,19 @@ public class HttpProxyCacheServer {
     private ArrayBlockingQueue<PreloadInfo> blockingQueue = new ArrayBlockingQueue<>(50);
     private final Object preloadLock = new Object();
     private boolean interrupt = false;
+    public static final long NONE = -1;
+    private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
+    /**
+     * this should be application context
+     */
+    public static Context context;
+    private final Object socketLock = new Object();
+    private Map<String, Socket> socketMap = new ConcurrentHashMap<>();
+    public static final String CONTENT_TYPE_VIDEO_MP4 = "video/mp4";
     private Thread conductPreloadThread = new Thread() {
         @Override
         public void run() {
-            while (!interrupt) {
+            while (!interrupt && HttpProxyCacheServer.this.isAlive()) {
                 synchronized (preloadLock) {
                     int put = 0;
                     int allow = getMaxAllowedAccept();
@@ -105,6 +114,7 @@ public class HttpProxyCacheServer {
 
     public HttpProxyCacheServer(Context context) {
         this(new Builder(context).buildConfig());
+        this.context = context;
     }
 
     private HttpProxyCacheServer(Config config) {
@@ -130,7 +140,7 @@ public class HttpProxyCacheServer {
     /**
      * Returns url that wrap original url and should be used for client (MediaPlayer, ExoPlayer, etc).
      * <p>
-     * If file for this url is fully cached (it means method {@link #isCached(String)} returns {@code true})
+     * If file for this url is fully cached (it means method {@link #isCacheCompleted(String)} returns {@code true})
      * then file:// uri to cached file will be returned.
      * <p>
      * Calling this method has same effect as calling {@link #getProxyUrl(String, boolean)} with 2nd parameter set to {@code true}.
@@ -169,10 +179,9 @@ public class HttpProxyCacheServer {
         public String toString() {
             return "PreloadInfo{" +
                     "title='" + title + '\'' +
-                    ", url='" + url + '\'' +
+                    (DEBUG ? ", url='" + url + '\'' : "") +
                     ", duration=" + duration +
                     ", offer=" + offer +
-                    ", cacheListener=" + cacheListener +
                     '}';
         }
     }
@@ -229,7 +238,7 @@ public class HttpProxyCacheServer {
      * @param title         :unique title
      * @param url           :the url to load
      * @param duration      :video duration,unit:second
-     * @param second        :time to preload,unit:second
+     * @param second        :time to preload,unit:second,recommend 5 second.
      * @param cacheListener :the notifier on completion
      */
     public void preload(String title, String url, long duration, int second, CacheListener cacheListener) {
@@ -248,9 +257,9 @@ public class HttpProxyCacheServer {
         }
 
         PreloadInfo info = new PreloadInfo(title, url, duration, second, cacheListener);
-        //        if (isAlive()) {
+//        if (isAlive()) {
         synchronized (preloadLock) {
-            if (!blockingQueue.contains(info) && !isCacheCompleted(url) && !isCached(url)) {
+            if (!blockingQueue.contains(info) && !isCacheCompleted(url) && !isCacheUncompleted(url)) {
                 LOG.warn("New a preload task:" + title);
                 try {
                     int size = blockingQueue.size();
@@ -281,6 +290,15 @@ public class HttpProxyCacheServer {
             }
         }
         return false;
+    }
+
+    /**
+     * cancel all pending tasks queued into before.
+     */
+    public void cancelAll() {
+        synchronized (preloadLock) {
+            blockingQueue.clear();
+        }
     }
 
     private long getOfferSize(PreloadInfo info) {
@@ -348,14 +366,6 @@ public class HttpProxyCacheServer {
         }
     }
 
-    /**
-     * return offset size of preloaded partial file.0 on failure.
-     */
-    private long getCacheFileSize(String url) {
-        File file = getCacheFile(url);
-        return file.exists() ? file.length() : 0;
-    }
-
     class PreloadRunnable implements Runnable {
         String title;
         String url;
@@ -388,11 +398,11 @@ public class HttpProxyCacheServer {
                 synchronized (clientsLock) {
                     HttpProxyCacheServerClients clients = clientsMap.get(url);
                     if (clients == null) {
-                        clients = new HttpProxyCacheServerClients(title, url, config, size, cacheListener);
+                        clients = new HttpProxyCacheServerClients(title, url, config, cacheListener);
                         clientsMap.put(url, clients);
                     }
                 }
-                urlSource = new HttpUrlSource(title, proxy);
+                urlSource = new HttpUrlSource(context, title, proxy, config.mime);
                 urlSource.openPartial(0, size);
             } catch (Exception e) {
                 HandyUtil.handle("preload " + this.urlSource, e);
@@ -404,15 +414,15 @@ public class HttpProxyCacheServer {
      * Returns url that wrap original url and should be used for client (MediaPlayer, ExoPlayer, etc).
      * <p>
      * If parameter {@code allowCachedFileUri} is {@code true} and file for this url is fully cached
-     * (it means method {@link #isCached(String)} returns {@code true}) then file:// uri to cached file will be returned.
+     * (it means method {@link #isCacheCompleted(String)} returns {@code true}) then file:// uri to cached file will be returned.
      *
      * @param url                a url to file that should be cached.
      * @param allowCachedFileUri {@code true} if allow to return file:// uri if url is fully cached
      * @return a wrapped by proxy url if file is not fully cached or url pointed to cache file otherwise (if {@code allowCachedFileUri} is {@code true}).
      */
     private String getProxyUrl(String url, boolean allowCachedFileUri) {
-        if (allowCachedFileUri && isCached(url)) {
-            File cacheFile = getCacheFile(url);
+        if (allowCachedFileUri && isCacheCompleted(url)) {
+            File cacheFile = getCacheCompletedFile(url);
             touchFileSafely(cacheFile);
             return Uri.fromFile(cacheFile).toString();
         }
@@ -462,9 +472,13 @@ public class HttpProxyCacheServer {
      * @param url an url cache file will be checked for.
      * @return {@code true} if cache contains fully cached file for passed in parameters url.
      */
-    private boolean isCached(String url) {
+    private boolean isCacheCompleted(String url) {
         checkNotNull(url, "Url can't be null!");
-        return getCacheFile(url).exists();
+        return getCacheCompletedFile(url).exists();
+    }
+
+    private boolean isCacheUncompleted(String url) {
+        return getCacheUncompletedFile(url).exists();
     }
 
     public void shutdown() {
@@ -495,20 +509,25 @@ public class HttpProxyCacheServer {
         return String.format(Locale.US, "http://%s:%d/%s", PROXY_HOST, port, ProxyCacheUtils.encode(url));
     }
 
-    private File getCacheFile(String url) {
+    private File getCacheCompletedFile(String url) {
         File cacheDir = config.cacheRoot;
         String fileName = config.fileNameGenerator.generate(url);
-
         return new File(cacheDir, fileName);
     }
 
-    private boolean isCacheCompleted(String url) {
-        try {
-            return new FileCache(getCacheFile(url), config.diskUsage).isCompleted();
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        }
-        return false;
+    private long getCacheCompletedFileSize(String url) {
+        File file = getCacheCompletedFile(url);
+        return file.exists() ? file.length() : 0;
+    }
+
+    private File getCacheUncompletedFile(String url) {
+        File file = getCacheCompletedFile(url);
+        return new File(file.getParentFile(), file.getName() + TEMP_POSTFIX);
+    }
+
+    private long getCacheUncompletedFileSize(String url) {
+        File file = getCacheUncompletedFile(url);
+        return file.exists() ? file.length() : 0;
     }
 
     private void touchFileSafely(File cacheFile) {
@@ -532,7 +551,7 @@ public class HttpProxyCacheServer {
         try {
             while (!Thread.currentThread().isInterrupted()) {
                 Socket socket = serverSocket.accept();
-                LOG.warn("Accept new socket " + socket);
+                LOG.warn("\n<Accept new request...>\n");
                 socketProcessor.submit(new SocketProcessorRunnable(socket));
             }
         } catch (IOException e) {
@@ -543,7 +562,7 @@ public class HttpProxyCacheServer {
     private String redirect(String url) {
         synchronized (redirectLock) {
             if (redirectMap.containsKey(url)) {
-                LOG.warn("hit redirect cache");
+                LOG.warn("hit redirect cache " + getTaskId(url));
                 return redirectMap.get(url);
             }
         }
@@ -591,17 +610,10 @@ public class HttpProxyCacheServer {
         return config.fileNameGenerator.generate(url);
     }
 
-    /**
-     * return false on ping,otherwise true
-     */
     private void processSocket(Socket socket) {
         String url = null;
         try {
-            //If this request is from player which ranges from a keyframe position,not from last cache position.
-            //  1.we'd cancel previous network request.
-            //  2.whether the previous cached file fragment is thrown or reused.
             GetRequest request = GetRequest.read(socket.getInputStream());
-
             url = ProxyCacheUtils.decode(request.uri);
 
             if (pinger.isPingRequest(url)) {
@@ -611,37 +623,33 @@ public class HttpProxyCacheServer {
                 if (url == null)
                     return;
 
-                /**
-                 * if has preload running
-                 * */
-                long cached = getCacheFileSize(url);
-                if (Log.isLoggable("HttpProxyCacheServer", Log.DEBUG))
-                    LOG.warn("Request to cache proxy:" + url + " , " + request + ",cached size:" + cached + "  # " + getTaskId(url));
+                boolean isCompleteCached = isCacheCompleted(url);
+                long cached = isCompleteCached ? getCacheCompletedFileSize(url) : getCacheUncompletedFileSize(url);
+
+                if (DEBUG)
+                    LOG.warn("Request to cache proxy:" + url + " , " + request + " ,isCompleteCached:" + isCompleteCached + ",cached size:" + cached + "  # " + getTaskId(url));
 
                 synchronized (clientsLock) {
-                    if (clientsMap.containsKey(url) && request.keyUA && !isCacheCompleted(url)) {
-                        LOG.warn("####### (Cancel) Previous running preload,ready to pick up uncompleted cache," + " # " + getTaskId(url) + " if possible !!!");
-                        //same url will access twice in a sequence.
-//                        clientsMap.get(url).shutdown();
+                    if (clientsMap.containsKey(url) && request.keyUA) {
+                        synchronized (socketLock) {
+                            if (socketMap.containsKey(url)) {
+                                releaseSocket(socketMap.get(url));
+                                socketMap.remove(url);
+                            }
+                        }
+                        LOG.warn("Opened connections: " + getClientsCount());
                     }
                 }
-                request.setUri(url);
-                if (cached != 0 && request.keyFrameRequest && request.rangeOffset > cached) {
-                    LOG.warn("searching key frame info out of range.. this will lead to load slow.\n" +
-                            "              1.we ought to cancel previous network request.\n" +
-                            "              2.whether the previous cached file fragment is thrown or reused..");
-                }
-                long offset = request.keyFrameRequest ? request.rangeOffset : cached;
 
-                HttpProxyCacheServerClients clients = getClients(url);
-                boolean continuePartial = false;
-                if (offset != 0) {
-                    continuePartial = !request.keyFrameRequest;
-                    LOG.warn("Continue "/* + (uncompleted ? "uncompleted" : "complete")*/ + "partial cache,load from:" + offset + " # " + getTaskId(url));
-                    request.setRangeOffset(offset);
-                    clients.clearRequestSize();
+                synchronized (socketLock) {
+                    if (!socketMap.containsKey(url)) {
+                        socketMap.put(url, socket);
+                    }
                 }
-                clients.processRequest(request, socket, continuePartial);
+
+                request.setUri(url);
+                HttpProxyCacheServerClients clients = getClients(url);
+                clients.processRequest(request, socket);
                 speed = clients.getCurrentSpeed();
 
                 synchronized (clientsLock) {
@@ -654,8 +662,9 @@ public class HttpProxyCacheServer {
             // There is no way to determine that client closed connection http://stackoverflow.com/a/10241044/999458
             // So just to prevent log flooding don't log stacktrace
             LOG.warn("Closing socket… Socket is closed by client.");
-        } catch (ProxyCacheException | IOException e) {
+        } catch (Exception e) {
             LOG.warn("Error processing request:" + e.getMessage());
+            e.printStackTrace();
             onError(new ProxyCacheException("Error processing request", e));
         } finally {
             releaseSocket(socket);
@@ -672,7 +681,7 @@ public class HttpProxyCacheServer {
         synchronized (clientsLock) {
             HttpProxyCacheServerClients clients = clientsMap.get(url);
             if (clients == null) {
-                clients = new HttpProxyCacheServerClients(null, url, config, Integer.MIN_VALUE);
+                clients = new HttpProxyCacheServerClients(null, url, config);
                 clientsMap.put(url, clients);
             }
             return clients;
@@ -762,6 +771,17 @@ public class HttpProxyCacheServer {
         }
     }
 
+    public static class ContentTypeProviderFactory {
+        public static IContentTypeProvider createEmptyContentTypeProvider() {
+            return new IContentTypeProvider() {
+                @Override
+                public String getMIME() {
+                    return "";
+                }
+            };
+        }
+    }
+
     /**
      * Builder for {@link HttpProxyCacheServer}.
      */
@@ -774,10 +794,15 @@ public class HttpProxyCacheServer {
         private DiskUsage diskUsage;
         private SourceInfoStorage sourceInfoStorage;
         private HeaderInjector headerInjector;
+        private IContentTypeProvider mime;
 
+        /**
+         * @param context :application context
+         */
         public Builder(Context context) {
+            HttpProxyCacheServer.context = context;
             this.sourceInfoStorage = SourceInfoStorageFactory.newSourceInfoStorage(context);
-            this.cacheRoot = context.getFilesDir();//StorageUtils.getIndividualCacheDirectory(context);
+            this.cacheRoot = context.getFilesDir();
             this.diskUsage = new TotalSizeLruDiskUsage(DEFAULT_MAX_SIZE);
             this.fileNameGenerator = new Md5FileNameGenerator();
             this.headerInjector = new EmptyHeadersInjector();
@@ -852,6 +877,14 @@ public class HttpProxyCacheServer {
         }
 
         /**
+         * set HTTP response Content-Type if possible
+         */
+        public Builder mimeProvider(IContentTypeProvider mime) {
+            this.mime = checkNotNull(mime);
+            return this;
+        }
+
+        /**
          * Add headers along the request to the server
          *
          * @param headerInjector to inject header base on url
@@ -873,7 +906,7 @@ public class HttpProxyCacheServer {
         }
 
         private Config buildConfig() {
-            return new Config(cacheRoot, fileNameGenerator, diskUsage, sourceInfoStorage, headerInjector);
+            return new Config(cacheRoot, fileNameGenerator, diskUsage, sourceInfoStorage, headerInjector, mime);
         }
 
     }

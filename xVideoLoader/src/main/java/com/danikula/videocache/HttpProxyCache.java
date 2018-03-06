@@ -15,6 +15,7 @@ import java.io.UnsupportedEncodingException;
 import java.net.Socket;
 import java.util.Locale;
 
+import static com.danikula.videocache.HttpProxyCacheServer.NONE;
 import static com.danikula.videocache.ProxyCacheUtils.DEFAULT_BUFFER_SIZE;
 
 /**
@@ -26,12 +27,12 @@ import static com.danikula.videocache.ProxyCacheUtils.DEFAULT_BUFFER_SIZE;
  */
 class HttpProxyCache extends ProxyCache {
     private static final Logger LOG = LoggerFactory.getLogger("HttpProxyCache");
-
-    private static final float NO_CACHE_BARRIER = .2f;
-
     private final HttpUrlSource source;
     private final FileCache cache;
     private CacheListener listener;
+    private HttpUrlSource httpUrlSource;
+    private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
+    private boolean allFromCache = false;
 
     public long getSpeed() {
         return speed;
@@ -47,36 +48,19 @@ class HttpProxyCache extends ProxyCache {
         this.listener = cacheListener;
     }
 
-    public boolean processRequest(GetRequest request, Socket socket, long requestSize, boolean continuePartial) {
+    public boolean processRequest(GetRequest request, Socket socket) {
         long time = System.currentTimeMillis();
         boolean ret = false;
         try {
             OutputStream out = new BufferedOutputStream(socket.getOutputStream());
-            String responseHeaders = newResponseHeaders(request, requestSize, request.keyFrameRequest, continuePartial);
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG)) {
-                LOG.warn("continuePartial:" + continuePartial + " ," + " \n\nSource:" + source);
+            String responseHeaders = newResponseHeaders(request);
+            if (DEBUG) {
+                LOG.warn(" \n\n" + request.uri + "\n" + responseHeaders);
             }
             out.write(responseHeaders.getBytes("UTF-8"));
 
-            long offset = request.rangeOffset;
-            //todo:if we play the in-preloading state task,cancel it,pick up downloaded part.but,we will resolve file stubs related.
-            if (cache.getFile().exists() && cache.isCompleted()) {
-                if (continuePartial) {
-                    return responseFromCache(out, offset); // ret = responseInsertCache(out, offset, false);
-                } else if (request.keyFrameRequest && offset <= cache.available()) {
-                    return ret = responseSkipWithCache(out, offset);
-                } else {
-                    return ret = responseWithCache(out, offset);
-                }
-            } else if (isUseCache(request)) {
-                if (requestSize == Integer.MIN_VALUE) {
-                    return ret = responseWithCache(out, offset);
-                } else {
-                    return ret = responseWithCache(out, offset, requestSize);
-                }
-            } else {
-                return ret = responseWithoutCache(out, offset);
-            }
+            return ret = response(out, request);
+
         } catch (UnsupportedEncodingException e) {
             e.printStackTrace();
         } catch (IOException e) {
@@ -84,315 +68,144 @@ class HttpProxyCache extends ProxyCache {
         } catch (Exception e) {
             e.printStackTrace();
         } finally {
-            LOG.warn("###### cache result:" + ret + ",time:" + (System.currentTimeMillis() - time) + "ms: " + request.uri);
+            LOG.warn("###### cache result:" + ret + ",time:" + (System.currentTimeMillis() - time) + "ms, " + (DEBUG ? request.uri : ""));
         }
         return ret;
     }
 
-    private boolean isUseCache(GetRequest request) throws ProxyCacheException {
-        long sourceLength = source.length();
-        boolean sourceLengthKnown = sourceLength > 0;
-        long cacheAvailable = cache.available();
-        // do not use cache for partial requests which too far from available cache. It seems user seek video.
-        return !sourceLengthKnown || !request.partial || (/*!request.keyFrameRequest && */request.rangeOffset <= cacheAvailable /*+ sourceLength * NO_CACHE_BARRIER*/);
-    }
-
-    private String newResponseHeaders(GetRequest request, long requestSize, boolean requestKeyFrame, boolean continuePartial) throws IOException, ProxyCacheException {
-        if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-            LOG.warn("request:" + request + " ,requestSize:" + requestSize + " ,cache.available:" + cache.available() + " ,source.length:" + source.length() + " ,continuePartial:" + continuePartial);
+    private String newResponseHeaders(GetRequest request) throws IOException, ProxyCacheException {
         LOG.warn("\n" + source);
-        if (requestSize != Integer.MIN_VALUE) {
-            String mime = source.getMime();
-            boolean mimeKnown = !TextUtils.isEmpty(mime);
-            long length = cache.isCompleted() ? cache.available() : source.length();
-            boolean lengthKnown = length >= 0;
-            long contentLength = request.partial ? requestSize : length;
-            boolean addRange = lengthKnown && request.partial;
-            return new StringBuilder()
-                    .append(request.partial ? "HTTP/1.1 206 PARTIAL CONTENT\n" : "HTTP/1.1 200 OK\n")
-                    .append("Accept-Ranges: bytes\n")
-                    .append(lengthKnown ? format("Content-Length: %d\n", contentLength) : "")
-                    .append(addRange ? format("Content-Range: bytes %d-%d/%d\n", request.rangeOffset, request.rangeOffset + requestSize - 1, length) : "")
-                    .append(mimeKnown ? format("Content-Type: %s\n", mime) : "")
-                    .append("\n") // headers end
-                    .toString();
-        } else if (continuePartial) {
-            String mime = source.getMime();
-            boolean mimeKnown = !TextUtils.isEmpty(mime);
-            long length = cache.available();// source.length();
-            boolean lengthKnown = length >= 0;
-            boolean addRange = lengthKnown && request.partial;
-            return new StringBuilder()
-                    .append(request.partial ? "HTTP/1.1 206 PARTIAL CONTENT\n" : "HTTP/1.1 200 OK\n")
-                    .append("Accept-Ranges: bytes\n")
-                    .append(lengthKnown ? format("Content-Length: %d\n", length /*contentLength*/) : "")
-                    .append(addRange ? format("Content-Range: bytes %d-%d/%d\n", 0/*request.rangeOffset*/, length/* request.rangeOffset + contentLength*/, length) : "")
-                    .append(mimeKnown ? format("Content-Type: %s\n", mime) : "")
-                    .append("\n") // headers end
-                    .toString();
-        } else if (requestKeyFrame) {
-            String mime = source.getMime();
-            boolean mimeKnown = !TextUtils.isEmpty(mime);
-            long length = source.length();
-            boolean lengthKnown = length >= 0;
-            long contentLength = source.length() - request.rangeOffset;
-            boolean addRange = lengthKnown && request.partial;
-            return new StringBuilder()
-                    .append(request.partial ? "HTTP/1.1 206 PARTIAL CONTENT\n" : "HTTP/1.1 200 OK\n")
-                    .append("Accept-Ranges: bytes\n")
-                    .append(lengthKnown ? format("Content-Length: %d\n", contentLength) : "")
-                    .append(addRange ? format("Content-Range: bytes %d-%d/%d\n", request.rangeOffset, source.length(), source.length()) : "")
-                    .append(mimeKnown ? format("Content-Type: %s\n", mime) : "")
-                    .append("\n") // headers end
-                    .toString();
-        } else {
-            String mime = source.getMime();
-            boolean mimeKnown = !TextUtils.isEmpty(mime);
-            long length = cache.isCompleted() ? cache.available() : source.length();
-            boolean lengthKnown = length >= 0;
-            long contentLength = request.partial ? source.length() : length;
-            boolean addRange = lengthKnown && request.partial;
-            return new StringBuilder()
-                    .append(request.partial ? "HTTP/1.1 206 PARTIAL CONTENT\n" : "HTTP/1.1 200 OK\n")
-                    .append("Accept-Ranges: bytes\n")
-                    .append(lengthKnown ? format("Content-Length: %d\n", contentLength) : "")
-                    .append(addRange ? format("Content-Range: bytes %d-%d/%d\n", request.rangeOffset, contentLength, length) : "")
-                    .append(mimeKnown ? format("Content-Type: %s\n", mime) : "")
-                    .append("\n") // headers end
-                    .toString();
+
+        String mime = source.getMime();
+        boolean mimeKnown = !TextUtils.isEmpty(mime);
+        long sourceLength = source.length();
+        long contentLength;
+        boolean lengthKnown = sourceLength >= 0;
+        if (lengthKnown && request.rangeTo >= sourceLength) {
+            throw new IllegalArgumentException("Request range to:" + request.rangeTo + " is greater than source length:" + sourceLength);
         }
+        if (request.partial && request.rangeTo == NONE) {
+            request.rangeTo = sourceLength - 1;
+        }
+        contentLength = request.rangeTo - request.rangeOffset + 1;
+        return new StringBuilder()
+                .append(request.partial ? "HTTP/1.1 206 PARTIAL CONTENT\n" : "HTTP/1.1 200 OK\n")
+                .append("Accept-Ranges: bytes\n")
+                .append(lengthKnown ? format("Content-Length: %d\n", contentLength) : "")
+                .append(lengthKnown ? format("Content-Range: bytes %d-%d/%d\n", request.rangeOffset, request.rangeTo, sourceLength) : "")
+                .append(mimeKnown ? format("Content-Type: %s\n", mime) : "")
+                .append("\n") // headers end
+                .toString();
     }
 
-    private boolean responseWithCache(OutputStream out, long offset) {
-        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-        int readBytes;
-        long size = 0;
-
+    private boolean response(OutputStream out, GetRequest request) {
         try {
-            while ((readBytes = read(buffer, offset, buffer.length)) != -1) {
-                out.write(buffer, 0, readBytes);
-                offset += readBytes;
-                size += readBytes;
+            if (httpUrlSource != null) {
+                httpUrlSource.close();
             }
-            out.flush();
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n##### WithCache offset " + offset + " loaded all success,in total:" + size + "  ##### " + source);
-            return true;
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        }
-        return false;
-    }
 
-    private boolean responseWithCache(OutputStream out, long offset, long requestSize) {
-        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-        int readBytes;
-        long size = 0;
-
-        try {
-            while ((readBytes = read(buffer, offset, buffer.length, requestSize)) != -1) {
-                out.write(buffer, 0, readBytes);
-                offset += readBytes;
-                size += readBytes;
-            }
-            out.flush();
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n#####WithCache offset:" + offset + " with requestSize: " + requestSize + " loaded all success,in total:" + size + "  ##### " + source);
-            return true;
-        } catch (Exception e) {
-            HandyUtil.handle("WithCache offset:" + offset + " with requestSize: " + requestSize, e);
-            return false;
-        }
-    }
-
-    private boolean responseWithoutCache(OutputStream out, long offset) {
-        HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
-        try {
-            long size = 0;
+            boolean echo = request.keyUA;
+            long cacheSize = cache.available();
             long last = 0;
+            long clientRead = 0;
             byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
             int readBytes;
-            long start = System.currentTimeMillis();
+            long from = request.rangeOffset;
+            long to = request.rangeTo;
+            httpUrlSource = new HttpUrlSource(this.source);
 
-            newSourceNoCache.open((int) offset);
-            while ((readBytes = newSourceNoCache.read(buffer)) != -1) {
-                out.write(buffer, 0, readBytes);
-                offset += readBytes;
-                size += readBytes;
-                if (System.currentTimeMillis() - start > 1 * 1000) {
-                    speed = (size - last);//instant single task speed
-                    last = size;
-                    start = System.currentTimeMillis();
-                }
-            }
-            out.flush();
+            if (DEBUG)
+                LOG.warn("request:[" + from + "," + to + "],cache size:" + cacheSize + ",echo:" + echo + "," + request);
+            if (from >= cacheSize) {
+                //we still request (cacheSize,sourceLength)
+                long offset = cacheSize;
 
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n##### WithoutCache offset " + offset + " loaded all success,in total:" + size + " ##### " + source);
-            return true;
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                newSourceNoCache.close();
-            } catch (ProxyCacheException e) {
-                e.printStackTrace();
-            }
-        }
-        return false;
-    }
+                if (DEBUG)
+                    LOG.warn("request from " + cacheSize + " " + request);
 
-    private boolean responseFromCache(OutputStream out, long offset) {
-        HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
-        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-        int readBytes;
-        long write = 0;
+                httpUrlSource.openPartial(cacheSize, to - cacheSize + 1);
+                long start = System.currentTimeMillis();
 
-        try {
-            //if we had downloaded whole file,just use it.
-            while ((readBytes = cache.read(buffer, write, buffer.length)) > 0 /*&& write < offset*/) {
-                out.write(buffer, 0, readBytes);
-                write += readBytes;
-            }
-            out.flush();
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n##### FromCache offset " + offset + " loaded from file success size:" + write + " ##### " + source);
-            if (write != offset) {
-                throw new IllegalStateException();
-            }
-            return true;
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                newSourceNoCache.close();
-            } catch (ProxyCacheException e) {
-                e.printStackTrace();
-            }
-        }
-        return false;
-    }
-
-
-    /**
-     * 如果本地已有缓存，跳过本地文件offset大小，开始请求
-     */
-    private boolean responseSkipWithCache(OutputStream out, long offset) {
-        long cacheSize = 0;
-        try {
-            cacheSize = cache.available();
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        }
-
-        HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
-        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-        int readBytes;
-        long write = offset;
-        long start = System.currentTimeMillis();
-        long size = 0;
-        long last = 0;
-
-        try {
-            //if we had downloaded whole file,just use it.
-            if (offset < cacheSize) {
-                while ((readBytes = cache.read(buffer, write, buffer.length)) > 0 /*&& write < offset*/) {
-                    out.write(buffer, 0, readBytes);
-                    write += readBytes;
-                }
-                out.flush();
-                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                    LOG.warn("\n\n##### SkipWithCache start offset " + offset + " loaded from file success size:" + (write - offset) + "  ##### " + source);
-            }
-
-            if (cacheSize < source.length()) {
-                newSourceNoCache.open((int) cacheSize);
-                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                    LOG.warn("\n\n##### SkipWithCache load from server offset:" + cacheSize + " ##### " + source);
-                while ((readBytes = newSourceNoCache.read(buffer)) > 0) {
-                    out.write(buffer, 0, readBytes);
-                    write += readBytes;
-                    size += readBytes;
+                while ((readBytes = httpUrlSource.read(buffer)) > 0) {
+                    offset += readBytes;
+                    //fill cache file with header part:(cacheSize+1,sourceLength).
+                    if (offset > from) {
+                        if (offset - readBytes < from) {
+                            if (echo)
+                                out.write(buffer, (int) (readBytes - (offset - from)), (int) (offset - from));
+                            clientRead += (offset - from);
+                        } else {
+                            if (echo)
+                                out.write(buffer, 0, readBytes);
+                            clientRead += readBytes;
+                        }
+                    }
                     cache.append(buffer, readBytes);
+
                     if (System.currentTimeMillis() - start > 1 * 1000) {
-                        speed = (size - last);//instant single task speed
-                        last = size;
+                        speed = (clientRead - last);//instant single task speed
+                        last = clientRead;
                         start = System.currentTimeMillis();
                     }
                 }
-                out.flush();
-                cache.complete();
-                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                    LOG.warn("\n\n##### SkipWithCache load from server success size:" + size + " ##### " + source);
-            }
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n##### SkipWithCache loaded all success,in total:" + write + " ##### " + source);
-            return true;
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
-            e.printStackTrace();
-        } finally {
-            try {
-                newSourceNoCache.close();
-            } catch (ProxyCacheException e) {
-                e.printStackTrace();
-            }
-        }
-        return false;
-    }
+            } else if (cacheSize < to && cacheSize > from) {
+                if (DEBUG)
+                    LOG.warn("request from " + cacheSize + " " + request);
 
-    private boolean responseInsertCache(OutputStream out, long offset, boolean allInLocal) {
-        HttpUrlSource newSourceNoCache = new HttpUrlSource(this.source);
-        byte[] buffer = new byte[DEFAULT_BUFFER_SIZE];
-        int readBytes;
-        long write = 0;
-        long start = System.currentTimeMillis();
+                //read [from,cacheSize] from cached file
+                long offset = from;
+                while ((readBytes = cache.read(buffer, offset, buffer.length)) > 0) {
+                    if (echo) {
+                        out.write(buffer, 0, readBytes);
+                    }
+                    offset += readBytes;
+                }
+                if (offset != cacheSize) {
+                    throw new IllegalStateException("offset != cacheSize");
+                }
+                //then continue to request from offset,here offset should be equals to cache size.
+                httpUrlSource.openPartial(offset, to - offset + 1);
+                long start = System.currentTimeMillis();
 
-        try {
-            //if we had downloaded whole file,just use it.
-            while ((readBytes = cache.read(buffer, write, buffer.length)) > 0 /*&& write < offset*/) {
-                out.write(buffer, 0, readBytes);
-                write += readBytes;
+                while ((readBytes = httpUrlSource.read(buffer)) > 0) {
+                    clientRead += readBytes;
+                    if (echo) {
+                        out.write(buffer, 0, readBytes);
+                    }
+                    offset += readBytes;
+                    cache.append(buffer, readBytes);
+                    if (System.currentTimeMillis() - start > 1 * 1000) {
+                        speed = (clientRead - last);//instant single task speed
+                        last = clientRead;
+                        start = System.currentTimeMillis();
+                    }
+                }
+            } else if (echo) {
+                if (DEBUG)
+                    LOG.warn("from cache " + request);
+                //read from local cached file
+                allFromCache = true;
+                long offset = from;
+                while ((readBytes = cache.read(buffer, offset, buffer.length)) > 0) {
+                    if (offset < to) {
+                        out.write(buffer, 0, readBytes);
+                    } else {
+                        out.write(buffer, 0, (int) (offset - to));
+                        break;
+                    }
+                    offset += readBytes;
+                }
             }
             out.flush();
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n##### InsertCache loaded from file success size:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
-            start = System.currentTimeMillis();
-            if (allInLocal && write != offset) {
-                throw new IllegalStateException();
-            }
-
-            if (!allInLocal) {
-                newSourceNoCache.open((int) offset);
-                if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                    LOG.warn("\n\n##### InsertCache load from server :" + write + " ##### " + source);
-                while ((readBytes = newSourceNoCache.read(buffer)) > 0) {
-                    out.write(buffer, 0, readBytes);
-                    write += readBytes;
-                    cache.append(buffer, readBytes);
-                }
-                out.flush();
-                cache.complete();
-            }
-            if (Log.isLoggable("HttpProxyCache", Log.DEBUG))
-                LOG.warn("\n\n##### InsertCache loaded all success,in total:" + write + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);
+            onCachePercentsAvailableChanged(100);
             return true;
-        } catch (ProxyCacheException e) {
-            e.printStackTrace();
-        } catch (IOException e) {
+        } catch (Exception e) {
             e.printStackTrace();
         } finally {
             try {
-                newSourceNoCache.close();
-            } catch (ProxyCacheException e) {
-                e.printStackTrace();
+                httpUrlSource.close();
+            } catch (ProxyCacheException e1) {
+                e1.printStackTrace();
             }
         }
         return false;
@@ -403,9 +216,14 @@ class HttpProxyCache extends ProxyCache {
     }
 
     @Override
+    protected void onCacheAvailable(long cacheAvailable, long sourceLength) {
+        super.onCacheAvailable(cacheAvailable, sourceLength);
+    }
+
+    @Override
     protected void onCachePercentsAvailableChanged(int percents) {
         if (listener != null) {
-            listener.onCacheAvailable(source.getTitle(), cache.file, source.getUrl(), percents);
+            listener.onCacheAvailable(source.getTitle(), cache.file, source.getUrl(), percents, allFromCache);
         }
     }
 }

@@ -7,6 +7,7 @@ import org.slf4j.LoggerFactory;
 
 import java.util.concurrent.atomic.AtomicInteger;
 
+import static com.danikula.videocache.HttpProxyCacheServer.NONE;
 import static com.danikula.videocache.Preconditions.checkNotNull;
 
 /**
@@ -37,6 +38,8 @@ class ProxyCache {
      * download speed,Bytes/s.keep in mind:single task speed,total speed,instant speed,average speed
      */
     public static long speed = -1;
+    private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
+
 
     public ProxyCache(Source source, Cache cache) {
         this.source = checkNotNull(source);
@@ -103,7 +106,7 @@ class ProxyCache {
     private synchronized void readSourceAsync() throws ProxyCacheException {
         boolean readingInProgress = sourceReaderThread != null && sourceReaderThread.getState() != Thread.State.TERMINATED;
         if (!stopped && !cache.isCompleted() && !readingInProgress) {
-            sourceReaderThread = new Thread(new SourceReaderRunnable(Integer.MIN_VALUE), "Source reader for " + source);
+            sourceReaderThread = new Thread(new SourceReaderRunnable(NONE), "Source reader for " + source);
             sourceReaderThread.start();
         }
     }
@@ -142,7 +145,6 @@ class ProxyCache {
         if (sourceLengthKnown && percentsChanged) {
             onCachePercentsAvailableChanged(percents);
         }
-//        LOG.warn("已经下载" + cacheAvailable + "/" + sourceLength);
         percentsAvailable = percents;
     }
 
@@ -150,12 +152,12 @@ class ProxyCache {
     }
 
     private void readSource(long requestSize) {
-        long sourceAvailable = Integer.MIN_VALUE;
+        long sourceAvailable = NONE;
         long offset = 0;
         try {
             offset = cache.available();
             long init = offset;
-            if (requestSize == Integer.MIN_VALUE) {
+            if (requestSize == NONE) {
                 source.open(offset);
             } else {
                 source.openPartial(offset, requestSize);
@@ -184,7 +186,7 @@ class ProxyCache {
             }
             if (tryComplete(requestSize)) {
                 onSourceRead();
-                if (Log.isLoggable("ProxyCache", Log.DEBUG))
+                if (DEBUG)
                     LOG.warn("\n\n##### Load success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
             } else {
                 LOG.warn("\n\n##### Load fail,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " ##### " + source);

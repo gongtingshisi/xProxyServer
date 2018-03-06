@@ -108,7 +108,7 @@ class Pinger {
 
     private boolean pingServer() throws ProxyCacheException {
         String pingUrl = getPingUrl();
-        HttpUrlSource source = new HttpUrlSource("ping", pingUrl);
+        HttpUrlSource source = new HttpUrlSource("ping", pingUrl, HttpProxyCacheServer.ContentTypeProviderFactory.createEmptyContentTypeProvider());
         try {
             byte[] expectedResponse = PING_RESPONSE.getBytes();
             source.open(0);

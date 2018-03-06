@@ -1,5 +1,7 @@
 package com.danikula.videocache.file;
 
+import android.util.Log;
+
 import com.danikula.videocache.Cache;
 import com.danikula.videocache.HandyUtil;
 import com.danikula.videocache.ProxyCacheException;
@@ -26,6 +28,7 @@ public class FileCache implements Cache {
     private final DiskUsage diskUsage;
     public File file;
     private RandomAccessFile dataFile;
+    private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
 
     public FileCache(File file) throws ProxyCacheException {
         this(file, new UnlimitedDiskUsage());
@@ -70,9 +73,6 @@ public class FileCache implements Cache {
     @Override
     public synchronized void append(byte[] data, int length) throws ProxyCacheException {
         try {
-//            if (isCompleted()) {
-//                throw new ProxyCacheException("Error append cache: cache file " + file + " is completed!");
-//            }
             dataFile.seek(available());
             dataFile.write(data, 0, length);
         } catch (IOException e) {
@@ -96,7 +96,7 @@ public class FileCache implements Cache {
         if (isCompleted()) {
             return true;
         }
-        close();
+//        close();
         String fileName = file.getName().substring(0, file.getName().length() - TEMP_POSTFIX.length());
         File completedFile = new File(file.getParentFile(), fileName);
 

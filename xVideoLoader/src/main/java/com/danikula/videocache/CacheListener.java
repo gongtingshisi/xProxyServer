@@ -15,5 +15,5 @@ public interface CacheListener {
     /**
      * title can be null
      */
-    void onCacheAvailable(String title, File cacheFile, String url, int percentsAvailable);
+    void onCacheAvailable(String title, File cacheFile, String url, int percentsAvailable, boolean allFromCache);
 }
