@@ -30,10 +30,6 @@ public class FileCache implements Cache {
     private RandomAccessFile dataFile;
     private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
 
-    public FileCache(File file) throws ProxyCacheException {
-        this(file, new UnlimitedDiskUsage());
-    }
-
     public FileCache(File file, DiskUsage diskUsage) throws ProxyCacheException {
         try {
             if (diskUsage == null) {
@@ -48,6 +44,10 @@ public class FileCache implements Cache {
         } catch (IOException e) {
             throw new ProxyCacheException("Error using file " + file + " as disc cache", e);
         }
+    }
+
+    public DiskUsage getDiskUsage() {
+        return diskUsage;
     }
 
     @Override
@@ -96,7 +96,7 @@ public class FileCache implements Cache {
         if (isCompleted()) {
             return true;
         }
-//        close();
+        close();
         String fileName = file.getName().substring(0, file.getName().length() - TEMP_POSTFIX.length());
         File completedFile = new File(file.getParentFile(), fileName);
 
@@ -135,4 +135,12 @@ public class FileCache implements Cache {
         return file.getName().endsWith(TEMP_POSTFIX);
     }
 
+    public void delete() {
+        try {
+            dataFile.close();
+        } catch (IOException e) {
+            e.printStackTrace();
+        }
+        file.delete();
+    }
 }

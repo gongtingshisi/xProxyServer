@@ -29,5 +29,7 @@ android {
 
 dependencies {
     compile 'org.slf4j:slf4j-android:1.7.21'
+//    compile 'com.googlecode.mp4parser:isoparser:1.1.21'
+    implementation fileTree(dir: 'libs', include: ['*.jar'])
 }
 

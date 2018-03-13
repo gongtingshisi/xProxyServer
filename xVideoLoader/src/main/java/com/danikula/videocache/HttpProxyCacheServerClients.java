@@ -75,7 +75,7 @@ final class HttpProxyCacheServerClients {
     }
 
     private synchronized void finishProcessRequest() {
-        if (clientsCount.decrementAndGet() <= 0) {
+        if (clientsCount.decrementAndGet() <= 0 && proxyCache != null) {
             proxyCache.shutdown();
             proxyCache = null;
         }
@@ -139,7 +139,7 @@ final class HttpProxyCacheServerClients {
             File file = (File) msg.obj;
             for (CacheListener cacheListener : listeners) {
                 if (file.exists() && file.length() > 0)
-                    cacheListener.onCacheAvailable(title, file, url, (int) msg.arg1, allFromCache);
+                    cacheListener.onCacheAvailable(title, file, url, msg.arg1, allFromCache);
             }
         }
     }

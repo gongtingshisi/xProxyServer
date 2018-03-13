@@ -37,7 +37,7 @@ class ProxyCache {
     /**
      * download speed,Bytes/s.keep in mind:single task speed,total speed,instant speed,average speed
      */
-    public static long speed = -1;
+    protected long speed = NONE;
     private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
 
 
@@ -184,8 +184,8 @@ class ProxyCache {
                     start = System.currentTimeMillis();
                 }
             }
-            if (tryComplete(requestSize)) {
-                onSourceRead();
+            if (tryComplete()) {
+                onSourceReady();
                 if (DEBUG)
                     LOG.warn("\n\n##### Load success,size:" + (offset - init) + ",time:" + (System.currentTimeMillis() - start) + " #####  " + source);
             } else {
@@ -200,22 +200,19 @@ class ProxyCache {
         }
     }
 
-    private void onSourceRead() {
+    protected void onSourceReady() {
         // guaranteed notify listeners after source read and cache completed
         percentsAvailable = 100;
         onCachePercentsAvailableChanged(percentsAvailable);
     }
 
-    private boolean tryComplete(long requestSize) throws ProxyCacheException {
-        //如果notifyNewCacheDataAvailable通知了另一个线程优先于此处执行，它持有这个锁，导致把FileCache流关闭，那么此处 cache.available就会抛出读取文件句柄异常
-//        synchronized (stopLock) {
-//        long available = cache.available();
-//        LOG.warn("tryComplete " + isStopped() + " " + available + " " + requestSize + " " + source.length());
-//            if (!isStopped() && available == (source instanceof HttpUrlSource ? requestSize : source.length())) {
-        return cache.complete();
-//            }
-//        }
-//        return false;
+    protected boolean tryComplete() throws ProxyCacheException {
+        synchronized (stopLock) {
+            if (!isStopped() && cache.available() == source.length()) {
+                return cache.complete();
+            }
+        }
+        return false;
     }
 
     private boolean isStopped() {

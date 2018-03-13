@@ -1,7 +1,11 @@
 package com.danikula.videocache;
 
 import android.content.Context;
+import android.net.ConnectivityManager;
+import android.net.NetworkInfo;
 import android.net.Uri;
+import android.net.wifi.WifiInfo;
+import android.net.wifi.WifiManager;
 import android.util.Log;
 import android.webkit.URLUtil;
 
@@ -29,6 +33,7 @@ import java.net.ServerSocket;
 import java.net.Socket;
 import java.net.SocketException;
 import java.net.URL;
+import java.util.Iterator;
 import java.util.Locale;
 import java.util.Map;
 import java.util.concurrent.ArrayBlockingQueue;
@@ -36,6 +41,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 
 import static com.danikula.videocache.Preconditions.checkAllNotNull;
 import static com.danikula.videocache.Preconditions.checkNotNull;
@@ -55,10 +61,11 @@ import static java.net.HttpURLConnection.HTTP_SEE_OTHER;
 public class HttpProxyCacheServer {
     private static final Logger LOG = LoggerFactory.getLogger("HttpProxyCacheServer");
     private static final String PROXY_HOST = "127.0.0.1";
-
     private final Object clientsLock = new Object();
     private final ExecutorService socketProcessor = Executors.newCachedThreadPool();
     private final Map<String, HttpProxyCacheServerClients> clientsMap = new ConcurrentHashMap<>();
+    private final Map<String, Socket> socketMap = new ConcurrentHashMap<>();
+    private final Object socketLock = new Object();
     private final ServerSocket serverSocket;
     private final int port;
     private final Thread waitConnectionThread;
@@ -66,46 +73,96 @@ public class HttpProxyCacheServer {
     private final Pinger pinger;
     private final ExecutorService preloadProcessor = Executors.newCachedThreadPool();
     private final Object redirectLock = new Object();
-    private long speed;
     private ArrayBlockingQueue<PreloadInfo> blockingQueue = new ArrayBlockingQueue<>(50);
     private final Object preloadLock = new Object();
     private boolean interrupt = false;
     public static final long NONE = -1;
     private boolean DEBUG = Log.isLoggable(getClass().getSimpleName(), Log.DEBUG);
-    /**
-     * this should be application context
-     */
     public static Context context;
-    private final Object socketLock = new Object();
-    private Map<String, Socket> socketMap = new ConcurrentHashMap<>();
     public static final String CONTENT_TYPE_VIDEO_MP4 = "video/mp4";
-    private Thread conductPreloadThread = new Thread() {
+    private CountDownLatch work = new CountDownLatch(1);
+    private int pending = 0;
+    private Object pendingLock = new Object();
+    public static final int BITRATE = 300;
+    private static final int BYTES_RATE = (BITRATE << 10) / 8;
+    private long speed;
+    private SpeedMonitor speedMonitor = new SpeedMonitor();
+    private PreloadConductor conductPreloadRunnable = new PreloadConductor();
+
+    private void increasePendingCount() {
+        synchronized (pendingLock) {
+            pending++;
+        }
+    }
+
+    private int getPendingCount() {
+        synchronized (pendingLock) {
+            return pending;
+        }
+    }
+
+
+    private void decreasePendingCount() {
+        synchronized (pendingLock) {
+            if (pending > 0)
+                pending--;
+        }
+    }
+
+    class PreloadConductor implements Runnable {
         @Override
         public void run() {
-            while (!interrupt && HttpProxyCacheServer.this.isAlive()) {
+            while (!interrupt) {
                 synchronized (preloadLock) {
-                    int put = 0;
-                    int allow = getMaxAllowedAccept();
-                    LOG.warn("max accepted:" + allow + " ，queue :" + blockingQueue.size() + " ,running:" + getClientsCount());
-                    do {
-                        if (allow > 0 && !blockingQueue.isEmpty()) {
-                            PreloadInfo info = blockingQueue.poll();
-                            LOG.warn("### Start preload " + info);
-                            preloadProcessor.submit(new PreloadRunnable(info.title, info.url, 0, getOfferSize(info), info.cacheListener));
-                            put++;
-                        } else
-                            break;
-                    } while (put < allow - getClientsCount());
-
                     try {
                         preloadLock.wait();
                     } catch (InterruptedException e) {
                         e.printStackTrace();
                     }
                 }
+
+                int put = 0;
+                int allow = getMaxAllowedAccept();
+                LOG.warn("Max accepted:" + allow + " ，queue :" + blockingQueue.size() + " ,pending:" + getPendingCount() + " ,running:" + getClientsCount());
+                do {
+                    if (allow > 0 && !blockingQueue.isEmpty()) {
+                        PreloadInfo info = null;
+                        try {
+                            info = blockingQueue.take();
+                        } catch (InterruptedException e) {
+                            e.printStackTrace();
+                        }
+                        if (info != null) {
+                            LOG.warn("### Start preload " + info);
+                            try {
+                                preloadProcessor.submit(new PreloadRunnable(info.title, info.url, 0, getOfferSize(info), info.cacheListener));
+                                put++;
+                                increasePendingCount();
+                            } catch (RejectedExecutionException e) {
+                                LOG.error("Reject task !");
+                            }
+                        } else {
+                            LOG.warn("Warning: Null object in queue...");
+                        }
+                        if (work.getCount() > 0) {
+                            LOG.warn("Waiting server start working...");
+                            try {
+                                work.await();
+                            } catch (InterruptedException e) {
+                                e.printStackTrace();
+                            }
+                        }
+                    } else {
+                        break;
+                    }
+                } while (put < allow);
             }
         }
-    };
+    }
+
+    private int getRunningCount() {
+        return getClientsCount() + getPendingCount();
+    }
 
     /**
      * whether we should give an expire timeout?
@@ -125,12 +182,13 @@ public class HttpProxyCacheServer {
             this.port = serverSocket.getLocalPort();
             IgnoreHostProxySelector.install(PROXY_HOST, port);
             CountDownLatch startSignal = new CountDownLatch(1);
-            this.waitConnectionThread = new Thread(new WaitRequestsRunnable(startSignal));
+            this.waitConnectionThread = new Thread(new WaitRequestsRunnable(startSignal, work));
             this.waitConnectionThread.start();
             startSignal.await(); // freeze thread, wait for server starts
             this.pinger = new Pinger(PROXY_HOST, port);
             LOG.debug("Proxy cache server started. Is it alive? " + isAlive());
-            conductPreloadThread.start();
+            preloadProcessor.submit(conductPreloadRunnable);
+            preloadProcessor.submit(speedMonitor);
         } catch (IOException | InterruptedException e) {
             socketProcessor.shutdown();
             throw new IllegalStateException("Error starting local proxy server", e);
@@ -153,11 +211,11 @@ public class HttpProxyCacheServer {
     }
 
     class PreloadInfo {
-        String title;
-        String url;
-        long duration;
-        int offer;
-        CacheListener cacheListener;
+        private String title;
+        private String url;
+        private long duration;
+        private int offer;
+        private CacheListener cacheListener;
 
         public PreloadInfo(String title, String url, long duration, int offer, CacheListener cacheListener) {
             this.title = title;
@@ -193,21 +251,67 @@ public class HttpProxyCacheServer {
         HIGH
     }
 
-    public static final int SPEED_NONE_MAX_NUM = 0;
-    public static final int SPEED_SLOW_MAX_NUM = 1;
-    public static final int SPEED_NORMAL_MAX_NUM = 2;
-    public static final int SPEED_HIGH_MAX_NUM = 3;
+    class SpeedMonitor implements Runnable {
+        @Override
+        public void run() {
+            while (!interrupt) {
+                synchronized (clientsLock) {
+                    if (clientsMap.size() > 0)
+                        speed = 0;
+                    for (HttpProxyCacheServerClients clients : clientsMap.values()) {
+                        try {
+                            speed += clients.getCurrentSpeed();
+                        } catch (ProxyCacheException e) {
+                            continue;
+                        }
+                    }
+                }
+                try {
+                    Thread.sleep(1 * 1000);
+                } catch (InterruptedException e) {
+                    e.printStackTrace();
+                }
+            }
+        }
+    }
+
+    private void dumpNetwork() {
+        if (DEBUG)
+            LOG.warn("Current connection:" + getNetworkTypeName(context));
+    }
+
+    public String getNetworkTypeName(Context context) {
+        ConnectivityManager connectMgr = (ConnectivityManager) context.getSystemService(Context.CONNECTIVITY_SERVICE);
+        if (connectMgr != null) {
+            NetworkInfo info = connectMgr.getActiveNetworkInfo();
+
+            if (info != null && info.isConnected()) {
+                if (info.getType() == ConnectivityManager.TYPE_WIFI) {
+                    WifiManager wifiManager = (WifiManager) context.getApplicationContext().getSystemService(Context.WIFI_SERVICE);
+                    if (wifiManager != null) {
+                        WifiInfo wifiInfo = wifiManager.getConnectionInfo();
+                        if (wifiInfo != null)
+                            return "Wifi:" + wifiInfo.getSSID();
+                    }
+                }
+                return info.getSubtypeName();
+            }
+        }
+        return "";
+    }
+
+    public static final int SPEED_NONE_MAX_NUM = 1;
+    public static final int SPEED_SLOW_MAX_NUM = 2;
+    public static final int SPEED_NORMAL_MAX_NUM = 3;
+    public static final int SPEED_HIGH_MAX_NUM = 4;
 
     private SPEED getSpeed() {
-        speed = HttpProxyCache.speed;
-        LOG.warn("instant single speed:" + speed);
-        if (speed < 0) {
-            return getClientsCount() > 0 ? SPEED.NORMAL : SPEED.SLOW;
-        } else if (speed < 1 * 1024)
+        LOG.warn("Instant  speed:" + speed);
+        if (speed < BYTES_RATE * SPEED_SLOW_MAX_NUM)
             return SPEED.NONE;
-        else if (speed < 30 * 1024)
+        else if (speed < BYTES_RATE * SPEED_NORMAL_MAX_NUM)
             return SPEED.SLOW;
-        else if (speed < 100 * 1024)
+        else if (speed < BYTES_RATE * SPEED_HIGH_MAX_NUM)
             return SPEED.NORMAL;
         else
             return SPEED.HIGH;
@@ -217,16 +321,16 @@ public class HttpProxyCacheServer {
         int allow = 0;
         switch (getSpeed()) {
             case NONE:
-                allow = SPEED_NONE_MAX_NUM - getClientsCount();
+                allow = SPEED_NONE_MAX_NUM - getRunningCount();
                 break;
             case SLOW:
-                allow = SPEED_SLOW_MAX_NUM - getClientsCount();
+                allow = SPEED_SLOW_MAX_NUM - getRunningCount();
                 break;
             case NORMAL:
-                allow = SPEED_NORMAL_MAX_NUM - getClientsCount();
+                allow = SPEED_NORMAL_MAX_NUM - getRunningCount();
                 break;
             case HIGH:
-                allow = SPEED_HIGH_MAX_NUM - getClientsCount();
+                allow = SPEED_HIGH_MAX_NUM - getRunningCount();
                 break;
         }
         return (allow < 0) ? 0 : allow;
@@ -258,16 +362,17 @@ public class HttpProxyCacheServer {
 
         PreloadInfo info = new PreloadInfo(title, url, duration, second, cacheListener);
 //        if (isAlive()) {
-        synchronized (preloadLock) {
-            if (!blockingQueue.contains(info) && !isCacheCompleted(url) && !isCacheUncompleted(url)) {
-                LOG.warn("New a preload task:" + title);
-                try {
-                    int size = blockingQueue.size();
-                    blockingQueue.add(info);
-                    if (size == 0)
-                        preloadLock.notifyAll();
-                } catch (IllegalStateException e) {
-                    LOG.error("Preload pool full exception ~~~ throw " + title);
+        if (!blockingQueue.contains(info) && !isCacheCompleted(url) && !isCacheUncompleted(url)) {
+            LOG.warn("New a preload task:" + title + " ，queue :" + (blockingQueue.size() + 1)
+                    + " ,pending:" + getPendingCount() + " ,running:" + getClientsCount());
+
+            boolean added = blockingQueue.offer(info);
+            if (!added) {
+                LOG.warn("Fail to add : " + title);
+            }
+            if (added) {
+                synchronized (preloadLock) {
+                    preloadLock.notifyAll();
                 }
             }
         }
@@ -275,35 +380,95 @@ public class HttpProxyCacheServer {
     }
 
     /**
-     * cancel a preload task if it hasn't been running.return true on success,otherwise false
+     * cancel a preload task in queue if it hasn't been running.
      *
      * @param title :unique title
      * @param url   :the url to cancel
      */
-    public boolean cancel(String title, String url) {
+    private void cancelQueueing(String title, String url) {
         if (url == null)
             throw new IllegalArgumentException("Plz give a legal input!");
-        synchronized (preloadLock) {
-            if (blockingQueue.contains(url)) {
-                LOG.warn("Cancel preload " + title + " :" + url);
-                return blockingQueue.remove(url);
+        for (Iterator<PreloadInfo> iterable = blockingQueue.iterator(); iterable.hasNext(); ) {
+            PreloadInfo info = iterable.next();
+            if (info.url.equals(url)) {
+                iterable.remove();
+                LOG.warn("Cancel preload queueing:" + title + " , queue:" + blockingQueue.size());
             }
         }
-        return false;
     }
 
     /**
-     * cancel all pending tasks queued into before.
+     * cancel a preload task in pending if it hasn't been running.
+     */
+    private void cancelPending(String title, String url) {
+        if (url == null)
+            throw new IllegalArgumentException("Plz give a legal input!");
+        //...
+        if (false) {
+            decreasePendingCount();
+        }
+    }
+
+    /**
+     * cancel a preload task ,include these ones are in running state
+     */
+    public void cancel(String title, String url) {
+        if (url == null)
+            throw new IllegalArgumentException("Plz give a legal input!");
+
+        cancelQueueing(title, url);
+        cancelPending(title, url);
+        cleanRunningClient(null, title, url, true);
+    }
+
+    private void cleanRunningClient(GetRequest request, String title, String url, boolean artificial) {
+        HttpProxyCacheServerClients clients;
+        Socket socket;
+
+        if ((request != null && request.keyUA) || artificial) {
+            synchronized (clientsLock) {
+                clients = clientsMap.get(url);
+                clientsMap.remove(url);
+
+                if (clients != null) {
+                    synchronized (socketLock) {
+                        socket = socketMap.get(url);
+                        if (socket != null)
+                            releaseSocket(socket);
+                        socketMap.remove(url);
+                    }
+                    clients.shutdown();
+                    if (artificial) {
+                        LOG.warn("Cancel preload running :" + title + " ，queue :" + blockingQueue.size()
+                                + " ,pending:" + getPendingCount() + " ,running:" + getClientsCount());
+                    }
+                }
+            }
+        }
+    }
+
+    /**
+     * CARE:cancel all tasks including playing state !
      */
     public void cancelAll() {
-        synchronized (preloadLock) {
-            blockingQueue.clear();
+        LOG.warn("Cancel all ...");
+        blockingQueue.clear();
+        synchronized (socketLock) {
+            for (Iterator iterator = socketMap.entrySet().iterator(); iterator.hasNext(); ) {
+                Map.Entry entry = (Map.Entry) iterator.next();
+                releaseSocket((Socket) entry.getValue());
+                socketMap.remove(entry.getKey());
+            }
+        }
+        shutdownClients();
+
+        synchronized (pendingLock) {
+            pending = 0;
         }
     }
 
     private long getOfferSize(PreloadInfo info) {
-        int bitrate = 400 * 1000;
-        return (512 * info.duration + bitrate * info.offer / 8);
+        return (512 * info.duration + BYTES_RATE * info.offer);
     }
 
     /**
@@ -385,14 +550,30 @@ public class HttpProxyCacheServer {
         @Override
         public void run() {
             try {
+                long offset = 0;
                 url = redirect(url);
-                if (url == null)
+                if (url == null) {
+                    decreasePendingCount();
                     return;
-                LOG.warn(title + " # Preload key:" + config.fileNameGenerator.generate(url));
+                }
+                LOG.warn("# Preload key:" + config.fileNameGenerator.generate(url) + " : " + title);
                 String proxy = getProxyUrl(url);
                 if (URLUtil.isFileUrl(proxy)) {
-                    LOG.warn("Local cache found,preload success # " + title);
+                    LOG.warn("Local complete cache found,preload success # " + title);
+                    decreasePendingCount();
                     return;
+                }
+
+                if (isPreloadedOrCached(url)) {
+                    long size = getPreloadedOrCachedSize(url);
+                    if (this.size > size) {
+                        offset = size;
+                        LOG.warn("Continue to preload from " + offset + " : " + title);
+                    } else {
+                        LOG.warn("Local partial cache found,preload success # " + title);
+                        decreasePendingCount();
+                        return;
+                    }
                 }
 
                 synchronized (clientsLock) {
@@ -402,10 +583,12 @@ public class HttpProxyCacheServer {
                         clientsMap.put(url, clients);
                     }
                 }
+
                 urlSource = new HttpUrlSource(context, title, proxy, config.mime);
-                urlSource.openPartial(0, size);
+                urlSource.openPartial(offset, size);
             } catch (Exception e) {
                 HandyUtil.handle("preload " + this.urlSource, e);
+                decreasePendingCount();
             }
         }
     }
@@ -426,7 +609,7 @@ public class HttpProxyCacheServer {
             touchFileSafely(cacheFile);
             return Uri.fromFile(cacheFile).toString();
         }
-        return isAlive() ? appendToProxyUrl(url) : url;
+        return appendToProxyUrl(url);
     }
 
     public String getPureProxyUrl(String url) {
@@ -483,8 +666,7 @@ public class HttpProxyCacheServer {
 
     public void shutdown() {
         LOG.warn("Shutdown proxy server");
-
-        shutdownClients();
+        cancelAll();
 
         config.sourceInfoStorage.release();
 
@@ -499,6 +681,7 @@ public class HttpProxyCacheServer {
             onError(new ProxyCacheException("Error shutting down proxy server", e));
         }
         socketProcessor.shutdown();
+        preloadProcessor.shutdown();
     }
 
     private boolean isAlive() {
@@ -530,6 +713,22 @@ public class HttpProxyCacheServer {
         return file.exists() ? file.length() : 0;
     }
 
+    private boolean isPreloadedOrCached(String url) {
+        if (isCacheCompleted(url))
+            return true;
+        if (isCacheUncompleted(url) && getCacheUncompletedFileSize(url) > 0)
+            return true;
+        return false;
+    }
+
+    private long getPreloadedOrCachedSize(String url) {
+        if (isCacheCompleted(url))
+            return getCacheCompletedFileSize(url);
+        if (isCacheUncompleted(url))
+            return getCacheUncompletedFileSize(url);
+        return 0;
+    }
+
     private void touchFileSafely(File cacheFile) {
         try {
             config.diskUsage.touch(cacheFile);
@@ -547,11 +746,13 @@ public class HttpProxyCacheServer {
         }
     }
 
-    private void waitForRequest() {
+    private void waitForRequest(CountDownLatch work) {
         try {
             while (!Thread.currentThread().isInterrupted()) {
                 Socket socket = serverSocket.accept();
-                LOG.warn("\n<Accept new request...>\n");
+                if (work.getCount() > 0)
+                    work.countDown();
+                LOG.warn("\n\nrequest " + socket + "...");
                 socketProcessor.submit(new SocketProcessorRunnable(socket));
             }
         } catch (IOException e) {
@@ -576,8 +777,11 @@ public class HttpProxyCacheServer {
             do {
                 connection = (HttpURLConnection) new URL(url).openConnection();
                 connection.setInstanceFollowRedirects(false);
-                connection.setConnectTimeout(3 * 1000);
+                long start = System.currentTimeMillis();
                 int code = connection.getResponseCode();
+                if (System.currentTimeMillis() - start >= 200) {
+                    LOG.warn("Redirect url too long time:" + (System.currentTimeMillis() - start) + " " + url);
+                }
                 redirected = code == HTTP_MOVED_PERM || code == HTTP_MOVED_TEMP || code == HTTP_SEE_OTHER;
                 if (redirected) {
                     url = connection.getHeaderField("Location");
@@ -612,16 +816,25 @@ public class HttpProxyCacheServer {
 
     private void processSocket(Socket socket) {
         String url = null;
+        GetRequest request;
+        dumpNetwork();
+
         try {
-            GetRequest request = GetRequest.read(socket.getInputStream());
+            request = GetRequest.read(socket.getInputStream());
             url = ProxyCacheUtils.decode(request.uri);
 
             if (pinger.isPingRequest(url)) {
                 pinger.responseToPing(socket);
             } else {
                 url = redirect(url);
+                if (!request.keyUA) {
+                    decreasePendingCount();
+                }
+
                 if (url == null)
                     return;
+
+                cleanRunningClient(request, null, url, false);
 
                 boolean isCompleteCached = isCacheCompleted(url);
                 long cached = isCompleteCached ? getCacheCompletedFileSize(url) : getCacheUncompletedFileSize(url);
@@ -629,33 +842,22 @@ public class HttpProxyCacheServer {
                 if (DEBUG)
                     LOG.warn("Request to cache proxy:" + url + " , " + request + " ,isCompleteCached:" + isCompleteCached + ",cached size:" + cached + "  # " + getTaskId(url));
 
+                request.setUri(url);
+                HttpProxyCacheServerClients clients = getClients(url);
+
+                synchronized (socketLock) {
+                    socketMap.remove(url);
+                    socketMap.put(url, socket);
+                }
+
+                clients.processRequest(request, socket);
+
                 synchronized (clientsLock) {
-                    if (clientsMap.containsKey(url) && request.keyUA) {
-                        synchronized (socketLock) {
-                            if (socketMap.containsKey(url)) {
-                                releaseSocket(socketMap.get(url));
-                                socketMap.remove(url);
-                            }
-                        }
-                        LOG.warn("Opened connections: " + getClientsCount());
-                    }
+                    clientsMap.remove(url);
                 }
 
                 synchronized (socketLock) {
-                    if (!socketMap.containsKey(url)) {
-                        socketMap.put(url, socket);
-                    }
-                }
-
-                request.setUri(url);
-                HttpProxyCacheServerClients clients = getClients(url);
-                clients.processRequest(request, socket);
-                speed = clients.getCurrentSpeed();
-
-                synchronized (clientsLock) {
-                    if (clientsMap.containsKey(url)) {
-                        clientsMap.remove(url);
-                    }
+                    socketMap.remove(url);
                 }
             }
         } catch (SocketException e) {
@@ -668,7 +870,7 @@ public class HttpProxyCacheServer {
             onError(new ProxyCacheException("Error processing request", e));
         } finally {
             releaseSocket(socket);
-            LOG.warn("Opened connections: " + getClientsCount());
+            LOG.warn("Opened connections: " + getClientsCount() + " ,pending:" + getPendingCount());
         }
         if (!pinger.isPingRequest(url)) {
             synchronized (preloadLock) {
@@ -745,15 +947,17 @@ public class HttpProxyCacheServer {
     private final class WaitRequestsRunnable implements Runnable {
 
         private final CountDownLatch startSignal;
+        private final CountDownLatch work;
 
-        public WaitRequestsRunnable(CountDownLatch startSignal) {
+        public WaitRequestsRunnable(CountDownLatch startSignal, CountDownLatch work) {
             this.startSignal = startSignal;
+            this.work = work;
         }
 
         @Override
         public void run() {
             startSignal.countDown();
-            waitForRequest();
+            waitForRequest(work);
         }
     }
 
@@ -787,7 +991,7 @@ public class HttpProxyCacheServer {
      */
     public static final class Builder {
 
-        private static final long DEFAULT_MAX_SIZE = 512 * 1024 * 1024;
+        public static final long DEFAULT_MAX_SIZE = 512 * 1024 * 1024;
 
         private File cacheRoot;
         private FileNameGenerator fileNameGenerator;
@@ -796,9 +1000,6 @@ public class HttpProxyCacheServer {
         private HeaderInjector headerInjector;
         private IContentTypeProvider mime;
 
-        /**
-         * @param context :application context
-         */
         public Builder(Context context) {
             HttpProxyCacheServer.context = context;
             this.sourceInfoStorage = SourceInfoStorageFactory.newSourceInfoStorage(context);

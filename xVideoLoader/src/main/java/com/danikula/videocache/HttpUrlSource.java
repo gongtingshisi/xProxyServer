@@ -18,6 +18,7 @@ import java.io.IOException;
 import java.io.InputStream;
 import java.io.InterruptedIOException;
 import java.net.HttpURLConnection;
+import java.net.ProtocolException;
 import java.net.URL;
 import java.util.Map;
 
@@ -96,7 +97,8 @@ public class HttpUrlSource implements Source {
     @Override
     public void open(long offset) throws ProxyCacheException {
         try {
-            LOG.warn("open " + getTitle() + " offset:" + offset + ", " + id);
+            if (DEBUG)
+                LOG.warn("open " + getTitle() + " offset:" + offset + ", " + id);
             connection = openConnection(offset, -1);
             inputStream = new BufferedInputStream(connection.getInputStream(), DEFAULT_BUFFER_SIZE);
             this.sourceInfo = new SourceInfo(sourceInfo.title, sourceInfo.url, sourceInfo.length, getMime());
@@ -112,7 +114,8 @@ public class HttpUrlSource implements Source {
     @Override
     public void openPartial(long offset, long size) throws ProxyCacheException {
         try {
-            LOG.warn("openPartial " + getTitle() + " offset:" + offset + ",size:" + size + ", " + id);
+            if (DEBUG)
+                LOG.warn("openPartial " + getTitle() + " offset:" + offset + ",size:" + size + ", " + id);
             connection = openConnection(offset, size, -1);
             inputStream = new BufferedInputStream(connection.getInputStream(), DEFAULT_BUFFER_SIZE);
             this.sourceInfo = new SourceInfo(sourceInfo.title, sourceInfo.url, sourceInfo.length, getMime());
@@ -138,6 +141,8 @@ public class HttpUrlSource implements Source {
 
     @Override
     public void close() throws ProxyCacheException {
+        //why is not ProxyCacheUtils.close(inputStream) better ?
+
         if (connection != null) {
             try {
                 connection.disconnect();
@@ -165,6 +170,9 @@ public class HttpUrlSource implements Source {
         } catch (InterruptedIOException e) {
             throw new InterruptedProxyCacheException("Reading source " + sourceInfo.url + " is interrupted", e);
         } catch (IOException e) {
+            if (e instanceof ProtocolException) {
+                LOG.error("\n\n\n#### Server or network bug: response unexpected end of stream error prematurely! ");
+            }
             throw new ProxyCacheException("Error reading data from " + sourceInfo.url, e);
         }
     }
@@ -181,7 +189,7 @@ public class HttpUrlSource implements Source {
         } catch (IOException e) {
             LOG.error("Error fetching info from " + sourceInfo.url + " # " + id, e);
         } finally {
-//            ProxyCacheUtils.close(inputStream);
+            ProxyCacheUtils.close(inputStream);
             if (urlConnection != null) {
                 LOG.debug(id + " fetchContentInfo disconnect");
                 urlConnection.disconnect();
