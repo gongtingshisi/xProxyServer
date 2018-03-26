@@ -143,6 +143,10 @@ class HttpProxyCache extends ProxyCache {
 
         try {
             boolean echo = request.keyUA;
+            /**
+             * Robustness: it doesn't affect delivery even though file operation fails :P
+             * */
+            boolean error = false;
             long cacheSize = cache.available();
             long last = 0;
             long clientRead = 0;
@@ -184,8 +188,12 @@ class HttpProxyCache extends ProxyCache {
                         }
                     }
 
-                    if (ignoreSkip) {
-                        cache.append(buffer, readBytes);
+                    if (ignoreSkip && !error) {
+                        try {
+                            cache.append(buffer, readBytes);
+                        } catch (ProxyCacheException e) {
+                            error = true;
+                        }
                     }
 
                     if (System.currentTimeMillis() - start > 1 * 1000) {
@@ -223,7 +231,13 @@ class HttpProxyCache extends ProxyCache {
                     if (echo) {
                         out.write(buffer, 0, readBytes);
                     }
-                    cache.append(buffer, readBytes);
+                    if (!error) {
+                        try {
+                            cache.append(buffer, readBytes);
+                        } catch (ProxyCacheException e) {
+                            error = true;
+                        }
+                    }
                     if (System.currentTimeMillis() - start > 1 * 1000) {
                         speed = (clientRead - last);//instant single task speed
                         last = clientRead;
