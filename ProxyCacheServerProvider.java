@@ -1,4 +1,4 @@
-package com.cootek.smallvideo.main;
+package com.your.package.name;
 
 
 import android.content.Context;
