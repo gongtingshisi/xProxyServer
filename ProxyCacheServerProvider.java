@@ -34,4 +34,14 @@ public class ProxyCacheServerProvider {
         getInstance(context);
         return mProxy;
     }
+
+    /**
+     * terminate preload service.
+     */
+    public static void close() {
+        if (mProxy != null)
+            mProxy.shutdown();
+        instance = null;
+        mProxy = null;
+    }
 }
